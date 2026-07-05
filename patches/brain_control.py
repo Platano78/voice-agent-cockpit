@@ -43,8 +43,9 @@ class BrainControl:
         self.default_persona = runtime_config.session.instructions or ""
         self.tools_armed = 0
         try:
-            runtime_config.session.tools = voice_tools.TOOL_DEFS
-            self.tools_armed = len(voice_tools.TOOL_DEFS)
+            armed = voice_tools.get_tool_defs()
+            runtime_config.session.tools = armed
+            self.tools_armed = len(armed)
         except Exception as e:
             logger.warning("BrainControl: failed to arm voice tools: %s", e)
 

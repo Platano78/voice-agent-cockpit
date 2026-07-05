@@ -29,6 +29,10 @@ _MCP_URL = os.environ.get("HERMES_MCP_URL", "http://localhost:8088/mcp")
 _MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 _MCP_TIMEOUT_S = 5.0
 
+# messages_send target for send_to_hermes: "platform:chat_id" (channels_list
+# format). Unset by default; each deployment sets its own target.
+_HERMES_TARGET = os.environ.get("HERMES_TARGET", "")
+
 _SHIM_URL = os.environ.get("HERMES_SHIM_URL", "http://localhost:8087/v1/chat/completions")
 _SHIM_TOKEN_FILE = os.environ.get("HERMES_SHIM_TOKEN_FILE", os.path.expanduser("~/.hermes/shim.env"))
 _SHIM_TOKEN_VAR = "HERMES_SHIM_TOKEN"
@@ -59,6 +63,12 @@ class CockpitStateEvent(PipelineEvent):
     hermes_ok: bool = True
     delegation: DelegationState = Field(default_factory=DelegationState)
     permissions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SearchLinksEvent(PipelineEvent):
+    type: Literal["search_links"] = "search_links"
+    query: str = ""
+    links: list[dict[str, Any]] = Field(default_factory=list)  # [{title, url, host}]
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -154,6 +164,17 @@ class HermesCockpit:
             logger.warning("HermesCockpit: tool %s returned isError", name)
             return None
         return _unwrap_tool_result(result)
+
+    def send_message(self, text: str) -> str:
+        """Fire-and-forget free-form message to Hermes (voice 'tell Hermes ...').
+
+        Not a delegation: does not touch self._delegation or its steps."""
+        if not _HERMES_TARGET:
+            return "Hermes messaging isn't configured — set the HERMES_TARGET environment variable (see README)."
+        result = self._tool_call("messages_send", {"target": _HERMES_TARGET, "message": text})
+        if result is None:
+            return "I couldn't reach Hermes to send that."
+        return "Sent to Hermes. Any reply will show up in the cockpit and in hermes_status."
     # -- Poll loop ---------------------------------------------------------
 
     def _baseline_cursor(self) -> None:
@@ -315,12 +336,32 @@ class HermesCockpit:
         return f"{'Approved' if approve else 'Denied'} the request."
     # -- Status + broadcast -----------------------------------------------
 
-    def status_summary(self) -> str:
-        """Short spoken summary of delegation + permissions state."""
+    def status_summary(self, detail: str = "summary") -> str:
+        """Short spoken summary of delegation + permissions state. ``detail``
+        selects which facet to report; unknown values fall back to summary."""
         if not self.hermes_ok:
             return "I can't reach Hermes right now."
         with self._delegation_lock:
             d = dict(self._delegation)
+
+        if detail == "last_result":
+            if d["result"]:
+                return f"Hermes's last result: {d['result']}"
+            return "Hermes hasn't finished anything yet."
+        if detail == "steps":
+            if d["steps"]:
+                texts = [s["text"] for s in d["steps"][-3:]]
+                return "Recent Hermes activity: " + "; ".join(texts)
+            return "No Hermes activity recorded yet."
+        if detail == "approvals":
+            perms = self._permissions
+            if not perms:
+                return "There's nothing waiting for approval."
+            p = perms[0]
+            field = p.get("summary") or p.get("action") or p.get("tool") or "an unnamed request"
+            n = len(perms)
+            return f"{n} approval{'s' if n != 1 else ''} waiting. The first is {field}."
+
         perms_n = len(self._permissions)
 
         if d["active"]:
@@ -345,6 +386,15 @@ class HermesCockpit:
         """Public alias so BrainControl can push a fresh snapshot to a client
         that just sent config_get, without waiting for the next poll."""
         self._broadcast_state()
+
+    def push_links(self, query: str, links: list[dict[str, Any]]) -> None:
+        """UI-surface web_search result links; fire-and-forget, never raises."""
+        if self.text_output_queue is None or not links:
+            return
+        try:
+            self.text_output_queue.put(SearchLinksEvent(query=query, links=links[:5]))
+        except Exception:
+            logger.warning("HermesCockpit: push_links failed", exc_info=True)
     def _broadcast_state(self) -> None:
         if self.text_output_queue is None:
             return

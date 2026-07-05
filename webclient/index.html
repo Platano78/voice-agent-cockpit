@@ -254,6 +254,8 @@
     font-family: var(--font-body);
   }
   .card .body { font-size: 16px; min-height: 24px; word-wrap: break-word; }
+  #linksList a { display:block; padding:6px 0; color: var(--accent); text-decoration: underline; font-size: 14px; word-break: break-all; }
+  #linksList a .linkHost { color: var(--text); opacity:.6; font-size: 12px; margin-left: 8px; }
   #assistantText .body { color: var(--accent); }
   #assistantText.speaking {
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
@@ -1231,6 +1233,11 @@
       <div class="body" id="assistantBody">—</div>
       <div class="panelFrame" aria-hidden="true"></div>
     </div>
+    <div class="card" id="linksCard" hidden>
+      <div class="label">Links</div>
+      <div id="linksList"></div>
+      <div class="panelFrame" aria-hidden="true"></div>
+    </div>
 
     <div id="pttWrap">
       <div class="statCol" id="statColL" aria-hidden="true"></div>
@@ -1315,6 +1322,8 @@ const els = {
   transcript: document.getElementById("transcriptBody"),
   assistant: document.getElementById("assistantBody"),
   assistantCard: document.getElementById("assistantText"),
+  linksCard: document.getElementById("linksCard"),
+  linksList: document.getElementById("linksList"),
   avatarPane: document.getElementById("avatarPane"),
   avatarMount: document.getElementById("avatarMount"),
   avatarFallback: document.getElementById("avatarFallback"),
@@ -1665,6 +1674,27 @@ function renderCockpit(state) {
   renderQuestCard(state);
   renderGateBanner(Array.isArray(state.permissions) ? state.permissions : []);
 }
+
+function renderSearchLinks(ev) {
+  const links = Array.isArray(ev.links) ? ev.links : [];
+  els.linksList.replaceChildren();
+  let shown = 0;
+  links.forEach((l) => {
+    const url = typeof l.url === "string" ? l.url : "";
+    if (!/^https?:\/\//i.test(url)) return; // scheme allowlist — web-derived URLs
+    const a = document.createElement("a");
+    a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.textContent = l.title || url;
+    const host = document.createElement("span");
+    host.className = "linkHost";
+    host.textContent = l.host || "";
+    a.appendChild(host);
+    els.linksList.appendChild(a);
+    shown += 1;
+  });
+  els.linksCard.hidden = shown === 0;
+}
+window.__renderSearchLinks = renderSearchLinks; // debug/verification hook
 
 // ── Approval gate: hold-to-approve (1.5s) / single-click deny ───────────
 const GATE_HOLD_MS = 1500;
@@ -2031,6 +2061,9 @@ function handleEvent(text) {
       break;
     case "cockpit_state":
       renderCockpit(ev);
+      break;
+    case "search_links":
+      renderSearchLinks(ev);
       break;
     case "config_ack":
       if (ev.permission_respond) {
