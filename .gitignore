@@ -1,0 +1,25 @@
+# Secrets / host-specific config
+brains.json
+
+# Proprietary / large avatar assets (not redistributed — see NOTICE)
+webclient/avatar/model/*.glb
+webclient/avatar/vendor/**/*.bin
+webclient/avatar/refs/
+webclient/avatar/**/*.png
+webclient/avatar/**/*.jpg
+
+# Python
+__pycache__/
+*.pyc
+
+# Environments
+.venv/
+
+# Node
+node_modules/
+
+# OS cruft
+.DS_Store
+
+# Scratch
+smoketest_scratch/

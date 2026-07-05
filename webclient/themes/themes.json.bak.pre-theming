@@ -1,0 +1,5 @@
+[
+  { "id": "sololeveling", "name": "Shadow Monarch", "swatch": ["#05050c", "#22d9ff"] },
+  { "id": "chainsawman", "name": "Devil Hunter", "swatch": ["#121110", "#ff5a1f"] },
+  { "id": "hacker", "name": "Terminal", "swatch": ["#000000", "#33ff66"] }
+]

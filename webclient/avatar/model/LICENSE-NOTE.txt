@@ -1,0 +1,38 @@
+Avatar: brunette-t.glb (T-pose variant of "brunette.glb")
+
+Source: https://github.com/met4citizen/TalkingHead
+Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/brunette-t.glb
+Fetched date: 2026-07-04
+
+Per the TalkingHead repository README (https://github.com/met4citizen/TalkingHead/blob/main/README.md),
+section "Licenses, attributions and notes related to the index.html web app assets":
+
+  Example avatar "brunette.glb" was created at Ready Player Me (https://readyplayer.me/).
+  The avatar is free to all developers for non-commercial use under the
+  CC BY-NC 4.0 DEED (https://creativecommons.org/licenses/by-nc/4.0/).
+
+This is a placeholder/personal-use asset. Per the vendor-staging slice ruling, the user may
+swap in their own Ready Player Me (or other) GLB later for any non-personal use.
+
+---
+
+Avatar: avatarsdk.glb (Tier 1 avatar-theming proof: distinct per-theme model,
+assigned to the "chainsawman" custom theme in themes/themes.json)
+
+Source: https://github.com/met4citizen/TalkingHead
+Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/avatarsdk.glb
+Fetched date: 2026-07-04
+
+Per the same TalkingHead README section:
+
+  Example avatar "avatarsdk.glb" was created at AvatarSDK (https://avatarsdk.com) for
+  non-commercial use.
+
+Verified before adoption: loads via TalkingHead's showAvatar() with no console errors,
+and its morph target dictionary includes ARKit-style viseme/blendshape keys (browDownLeft,
+eyeBlinkLeft, etc.) required for lip-sync. Uses its own mesh/material naming convention
+(AvatarBody/AvatarHead/AvatarLeftEyeball/AvatarRightEyeball/outfit_top, not RPM's Wolf3D_*)
+— see avatar/avatar.mjs SLOT_TO_MATERIAL for how both naming conventions are mapped to the
+same semantic material slots (hair/skin/top/eyes) used by themes.json.
+
+Same license tier as brunette-t.glb (non-commercial) — placeholder/personal-use asset.

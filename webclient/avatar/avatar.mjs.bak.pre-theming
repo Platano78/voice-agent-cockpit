@@ -1,0 +1,146 @@
+// Avatar pane glue: TalkingHead (3D head render) + HeadAudio (audio-driven
+// viseme detection), wired to the client's own PCM playback path. Loaded ONLY
+// via dynamic import() from index.html (desktop + pane-enabled gate lives
+// there) — this module assumes it will only ever run in that context.
+//
+// Lifecycle is entirely our responsibility: TalkingHead does not stop
+// rendering on tab-hide, does not react to WebGL context loss, and has no
+// concept of a "collapsed" state — all three are implemented below.
+import { TalkingHead } from "./vendor/talkinghead/talkinghead.mjs";
+import { HeadAudio } from "./vendor/headaudio/headaudio.mjs";
+
+// Semantic best-fit from the page's 7 MOOD_VALUES onto TalkingHead's 8 moods
+// (neutral, happy, angry, sad, fear, disgust, love, sleep). "thinking" and
+// "serious" have no good match (see integration report) — mapped to the
+// closest non-misleading option rather than left unmapped.
+const MOOD_MAP = {
+  neutral: "neutral",
+  happy: "happy",
+  excited: "happy",
+  thinking: "neutral",
+  concerned: "sad",
+  playful: "love",
+  serious: "angry",
+};
+
+const MAX_CONTEXT_REBUILDS = 3;
+const AVATAR_URL = "./avatar/model/brunette-t.glb";
+const HEADWORKLET_URL = "./avatar/vendor/headaudio/headworklet.mjs";
+const HEADAUDIO_MODEL_URL = "./avatar/vendor/headaudio/model-en-mixed.bin";
+
+export async function initAvatar(mountNode, fallbackNode, hooks) {
+  let head = null;
+  let ha = null;
+  let userExpanded = true;
+  let rebuildAttempts = 0;
+  const debugState = { visemeEvents: 0 };
+
+  function applyRunState() {
+    if (!head) return;
+    const shouldRun = userExpanded && document.visibilityState === "visible";
+    if (shouldRun && !head.isRunning) head.start();
+    else if (!shouldRun && head.isRunning) head.stop();
+  }
+  document.addEventListener("visibilitychange", applyRunState);
+
+  function showFallback(message) {
+    if (mountNode) mountNode.hidden = true;
+    if (fallbackNode) {
+      fallbackNode.textContent = message;
+      fallbackNode.hidden = false;
+    }
+  }
+
+  function attachContextGuard(canvas) {
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+    }, false);
+    canvas.addEventListener("webglcontextrestored", async () => {
+      rebuildAttempts += 1;
+      if (rebuildAttempts > MAX_CONTEXT_REBUILDS) {
+        showFallback("Avatar unavailable (context lost)");
+        return;
+      }
+      try {
+        if (head) { try { head.dispose(); } catch { /* already gone */ } head = null; }
+        await buildHead();
+        head.opt.update = ha ? ha.update.bind(ha) : null;
+        rebuildAttempts = 0; // successful rebuild — don't let a single flaky loss count toward the cap
+      } catch {
+        showFallback("Avatar unavailable (context lost)");
+      }
+    }, false);
+  }
+
+  async function buildHead() {
+    head = new TalkingHead(mountNode, {
+      cameraView: "head",
+      cameraRotateEnable: false,
+      modelFPS: 30,
+      lipsyncLang: "en",
+      // Only "en" is vendored — TalkingHead's constructor eagerly dynamic-imports
+      // every entry in lipsyncModules (default ['fi','en','lt']); leaving the
+      // default in place 404s two unhandled module imports on every load.
+      lipsyncModules: ["en"],
+    });
+    attachContextGuard(head.renderer.domElement);
+    await head.showAvatar({ url: AVATAR_URL, body: "F", lipsyncLang: "en" });
+    applyRunState();
+  }
+
+  async function setupHeadAudio() {
+    const audioCtx = hooks.getPlayCtx();
+    await audioCtx.audioWorklet.addModule(HEADWORKLET_URL);
+    ha = new HeadAudio(audioCtx, {
+      processorOptions: { visemeEventsEnabled: true },
+      parameterData: { vadGateActiveDb: -40, vadGateInactiveDb: -60 },
+    });
+    await ha.loadModel(HEADAUDIO_MODEL_URL);
+    ha.onvalue = (key, value) => {
+      if (!head) return;
+      Object.assign(head.mtAvatar[key], { newvalue: value, needsUpdate: true });
+      debugState.visemeEvents += 1;
+    };
+    // Pure analysis sink: gain node the playback path connects into IN
+    // ADDITION to its existing destination connection (see hooks.setTap
+    // caller in index.html) — never itself connected to destination, so it
+    // cannot double the audio output.
+    const tapNode = audioCtx.createGain();
+    tapNode.gain.value = 1;
+    tapNode.connect(ha);
+    hooks.setTap(tapNode);
+  }
+
+  // Head render is REQUIRED (no head = nothing to show, fall back). Lip-sync
+  // is OPTIONAL — a HeadAudio failure (e.g. AudioWorklet unavailable on a
+  // plain-HTTP, non-secure-context origin) degrades to a silent, motionless-
+  // mouth head rather than killing the whole pane.
+  try {
+    await buildHead();
+  } catch {
+    showFallback("Avatar unavailable");
+    return { start() {}, stop() {} };
+  }
+  try {
+    await setupHeadAudio();
+  } catch (e) {
+    ha = null;
+    console.warn("[avatar] lip-sync unavailable:", e.message);
+  }
+  head.opt.update = ha ? ha.update.bind(ha) : null;
+
+  window.__avatarDebug = {
+    get head() { return head; },
+    get ha() { return ha; },
+    get visemeEvents() { return debugState.visemeEvents; },
+    get rebuildAttempts() { return rebuildAttempts; },
+  };
+  window.__avatarMood = (mood) => {
+    head?.setMood(MOOD_MAP[mood] || "neutral");
+  };
+
+  return {
+    start() { userExpanded = true; applyRunState(); },
+    stop() { userExpanded = false; applyRunState(); },
+  };
+}

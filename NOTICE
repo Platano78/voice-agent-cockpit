@@ -1,0 +1,25 @@
+This project builds on and redistributes patches for the following
+third-party works. Their own licenses govern their respective code.
+
+1. huggingface/speech-to-speech
+   https://github.com/huggingface/speech-to-speech
+   License: Apache License 2.0
+   Not vendored here — `setup.sh` clones and pins it at a specific commit.
+   `patches/` contains an overlay pack of modified files from this framework
+   (see patches/README.md for exactly which files and why).
+
+2. met4citizen/TalkingHead
+   https://github.com/met4citizen/TalkingHead
+   License: MIT
+   The webclient's avatar rendering code under `webclient/avatar/vendor/`
+   integrates with this library.
+
+Avatar model assets, vendor binary data, and theme reference images used
+during development of this cockpit are NOT redistributed in this repository
+(see .gitignore). Any such assets are the responsibility of the self-hoster
+to obtain and license appropriately for their own use — nothing in this
+NOTICE grants rights to any asset not present in the repository.
+
+This project's own original code (webclient UI beyond the vendored avatar
+library, the patch pack's persona/brain-selector logic, setup scripts, and
+documentation) is licensed under the MIT License — see LICENSE.

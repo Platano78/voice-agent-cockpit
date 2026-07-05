@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Shadow Monarch System UI</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&amp;family=Inter:wght@400;700&amp;family=Cinzel:wght@400;700;900&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface-tint": "#c6c6c6",
+                        "on-surface-variant": "#c4c7c7",
+                        "on-primary-fixed-variant": "#464747",
+                        "surface": "#131313",
+                        "on-secondary-fixed": "#351000",
+                        "on-error": "#690005",
+                        "secondary": "#ffb693",
+                        "surface-container": "#1f2020",
+                        "on-tertiary-fixed-variant": "#484828",
+                        "on-secondary": "#562000",
+                        "on-primary-fixed": "#1a1c1c",
+                        "secondary-fixed": "#ffdbcc",
+                        "surface-dim": "#131313",
+                        "surface-variant": "#353535",
+                        "inverse-primary": "#5d5e5f",
+                        "on-surface": "#e4e2e1",
+                        "inverse-on-surface": "#303030",
+                        "error-container": "#93000a",
+                        "primary-container": "#c0c0c0",
+                        "outline-variant": "#444748",
+                        "surface-bright": "#393939",
+                        "tertiary-fixed-dim": "#cac99f",
+                        "tertiary": "#e0deb3",
+                        "error": "#ffb4ab",
+                        "primary-fixed-dim": "#c6c6c6",
+                        "outline": "#8e9192",
+                        "on-primary": "#2f3131",
+                        "on-primary-container": "#4d4e4f",
+                        "inverse-surface": "#e4e2e1",
+                        "surface-container-low": "#1b1c1c",
+                        "surface-container-lowest": "#0e0e0e",
+                        "surface-container-high": "#2a2a2a",
+                        "secondary-container": "#ea6b1e",
+                        "tertiary-container": "#c3c299",
+                        "surface-container-highest": "#353535",
+                        "background": "#131313",
+                        "on-background": "#e4e2e1",
+                        "on-tertiary-fixed": "#1d1d03",
+                        "on-tertiary-container": "#50502f",
+                        "on-secondary-container": "#4b1b00",
+                        "primary-fixed": "#e3e2e2",
+                        "primary": "#dcdcdc",
+                        "on-error-container": "#ffdad6",
+                        "secondary-fixed-dim": "#ffb693",
+                        "on-secondary-fixed-variant": "#7a3000",
+                        "on-tertiary": "#323214",
+                        "tertiary-fixed": "#e6e5b9"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    fontFamily: {
+                        "display-md": ["Space Mono"],
+                        "display-lg": ["Space Mono"],
+                        "label-caps": ["Inter"],
+                        "body-md": ["Inter"],
+                        "technical-sm": ["Space Mono"],
+                        "gothic": ["Cinzel", "serif"]
+                    },
+                    fontSize: {
+                        "display-md": ["32px", { "lineHeight": "1.2", "letterSpacing": "1px", "fontWeight": "700" }],
+                        "display-lg": ["48px", { "lineHeight": "1.2", "letterSpacing": "2px", "fontWeight": "700" }],
+                        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.1em", "fontWeight": "700" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "technical-sm": ["14px", { "lineHeight": "20px", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+
+        .shadow-monarch-gradient {
+            background: linear-gradient(135deg, rgba(19, 19, 19, 0.95) 0%, rgba(10, 10, 40, 0.9) 100%);
+        }
+
+        .glow-border {
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            box-shadow: 0 0 15px rgba(167, 139, 250, 0.2), inset 0 0 5px rgba(0, 255, 255, 0.1);
+            clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+        }
+
+        .scanline {
+            background: linear-gradient(to bottom, rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 4px, 3px 100%;
+            pointer-events: none;
+        }
+
+        .angular-header {
+            clip-path: polygon(0 0, 100% 0, 95% 100%, 5% 100%);
+        }
+
+        .hex-container {
+            clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+        }
+
+        .stat-bar {
+            background: linear-gradient(to top, #ea6b1e 0%, #ffb693 50%, #e0deb3 100%);
+            transition: height 0.1s ease;
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 0.6; filter: brightness(1); }
+            50% { opacity: 1; filter: brightness(1.5); }
+        }
+        .animate-pulse-glow {
+            animation: pulse-glow 2s infinite ease-in-out;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="bg-background text-on-background overflow-hidden font-body-md h-screen w-screen flex flex-col">
+<!-- Full Screen Background Shader -->
+<!-- STITCH_SHADER_START:ANIMATION_10 class="absolute inset-0 w-full h-full z-0 opacity-40" -->
+<div class="absolute inset-0 w-full h-full z-0 opacity-40" style="display:block;">
+<canvas id="shader-canvas-ANIMATION_10" style="display:block;width:100%;height:100%"></canvas>
+<script>
+(function() {
+  const canvas = document.getElementById('shader-canvas-ANIMATION_10');
+
+  // Sync the WebGL drawing-buffer size with the CSS-driven layout size.
+  // This fires on initial layout and whenever the element is resized.
+  function syncSize() {
+    const w = canvas.clientWidth  || 1280;
+    const h = canvas.clientHeight || 720;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width  = w;
+      canvas.height = h;
+    }
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(syncSize).observe(canvas);
+  }
+  syncSize();
+
+  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  if (!gl) return;
+  const vs = `attribute vec2 a_position;
+varying vec2 v_texCoord;
+void main() {
+  v_texCoord = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+  const fs = `precision highp float;
+uniform float u_time;
+uniform vec2 u_resolution;
+varying vec2 v_texCoord;
+
+void main() {
+    vec2 uv = v_texCoord;
+    
+    // Deep Shadow Monarch palette
+    vec3 midnight = vec3(0.02, 0.01, 0.05);
+    vec3 indigo = vec3(0.1, 0.05, 0.25);
+    vec3 violet = vec3(0.3, 0.1, 0.5);
+    
+    float t = u_time * 0.3;
+    
+    // Flowing mist/smoke effect using sine waves and noise-like patterns
+    float noise = sin(uv.x * 3.0 + t) * cos(uv.y * 2.0 - t * 0.5);
+    noise += sin(uv.y * 5.0 - t * 0.8) * 0.5;
+    
+    // Create soft, moving "void mist"
+    float mist = smoothstep(0.3, 0.8, length(uv - 0.5) + noise * 0.1);
+    
+    vec3 color = mix(midnight, indigo, mist);
+    
+    // Add pulsing violet energy at the bottom
+    float pulse = (sin(t * 2.0) * 0.5 + 0.5) * 0.2;
+    float energy = smoothstep(0.0, 1.0, uv.y) * pulse;
+    color = mix(color, violet, energy * 0.3);
+    
+    // Subtle static grain for "system" texture
+    float grain = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
+    color += grain * 0.02;
+
+    gl_FragColor = vec4(color, 1.0);
+}`;
+  function cs(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, cs(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, cs(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const pos = gl.getAttribLocation(prog, 'a_position');
+  gl.enableVertexAttribArray(pos);
+  gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+  const uTime = gl.getUniformLocation(prog, 'u_time');
+  const uRes = gl.getUniformLocation(prog, 'u_resolution');
+  const uMouse = gl.getUniformLocation(prog, 'u_mouse');
+
+  // u_mouse is in pixel coordinates matching u_resolution (ShaderToy convention).
+  // Shaders that need normalized coords should use: u_mouse / u_resolution.
+  let mouse = { x: canvas.width / 2, y: canvas.height / 2 };
+  window.addEventListener('mousemove', (event) => {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width && rect.height) {
+      const nx = (event.clientX - rect.left) / rect.width;
+      const ny = 1.0 - (event.clientY - rect.top) / rect.height;
+      mouse.x = nx * canvas.width;
+      mouse.y = ny * canvas.height;
+    }
+  });
+
+  function render(t) {
+    if (typeof ResizeObserver === 'undefined') syncSize();
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    if (uTime) gl.uniform1f(uTime, t * 0.001);
+    if (uRes) gl.uniform2f(uRes, canvas.width, canvas.height);
+    if (uMouse) gl.uniform2f(uMouse, mouse.x, mouse.y);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    requestAnimationFrame(render);
+  }
+  render(0);
+})();
+</script>
+</div>
+<!-- STITCH_SHADER_END:ANIMATION_10 -->
+<!-- Scanline Overlay -->
+<div class="fixed inset-0 z-10 scanline opacity-30"></div>
+<!-- Top Navigation Bar -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-10 h-16 border-b border-outline-variant bg-gradient-to-br from-surface-bright/20 to-surface-dim/40 backdrop-blur-md">
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-secondary" style="font-variation-settings: 'FILL' 1;">settings</span>
+<h1 class="font-gothic text-display-md text-primary tracking-widest uppercase">HI-FI VOICE PRO</h1>
+</div>
+<div class="flex items-center gap-6">
+<div class="flex flex-col items-end">
+<span class="font-technical-sm text-xs text-outline uppercase tracking-tighter">System Status</span>
+<span class="font-technical-sm text-secondary text-sm">LEVEL 99 MONARCH</span>
+</div>
+<span class="material-symbols-outlined text-primary text-3xl">account_circle</span>
+</div>
+</header>
+<!-- Main System Content -->
+<main class="relative z-20 flex-1 mt-16 px-6 md:px-12 py-8 flex flex-col gap-8 max-w-7xl mx-auto w-full">
+<!-- Header Notification Section -->
+<div class="w-full flex justify-center">
+<div class="angular-header bg-secondary-container/20 border-x-2 border-secondary px-12 py-2 shadow-lg shadow-secondary-container/10">
+<h2 class="font-gothic font-black text-secondary tracking-widest text-lg">NOTIFICATION</h2>
+</div>
+</div>
+<!-- Assistant Message (Holographic Window) -->
+<div class="relative group mt-4">
+<div class="glow-border bg-surface-container-highest/60 backdrop-blur-xl p-8 md:p-12 relative overflow-hidden">
+<!-- Grid pattern background overlay -->
+<div class="absolute inset-0 opacity-10 pointer-events-none" style="background-image: radial-gradient(#fff 1px, transparent 1px); background-size: 20px 20px;"></div>
+<div class="relative z-10">
+<p class="font-technical-sm text-secondary mb-4 flex items-center gap-2">
+<span class="inline-block w-2 h-2 bg-secondary rounded-full animate-pulse"></span>
+                        [SYSTEM: YOU HAVE RECEIVED A NEW MESSAGE]
+                    </p>
+<p class="font-gothic text-2xl md:text-4xl text-on-surface leading-snug">
+                        "Leveling up requires constant focus. How shall we proceed, Monarch?"
+                    </p>
+</div>
+<!-- Corner Accents -->
+<div class="absolute top-0 left-0 w-8 h-1 bg-secondary shadow-[0_0_10px_#ffb693]"></div>
+<div class="absolute bottom-0 right-0 w-1 h-8 bg-secondary shadow-[0_0_10px_#ffb693]"></div>
+</div>
+</div>
+<!-- Quest Log / User Transcript -->
+<div class="flex flex-col gap-4 max-w-2xl">
+<div class="flex items-center gap-3">
+<span class="h-px flex-1 bg-outline/30"></span>
+<h3 class="font-technical-sm text-outline uppercase tracking-[0.2em] text-xs">Quest Log</h3>
+<span class="h-px flex-1 bg-outline/30"></span>
+</div>
+<div class="glow-border bg-surface-container-low/80 backdrop-blur-md px-6 py-4 flex items-center justify-between group cursor-pointer hover:bg-surface-container-high transition-all">
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-secondary" style="font-variation-settings: 'FILL' 1;">radio</span>
+<span class="font-technical-sm text-on-surface text-lg">"Play my training playlist."</span>
+</div>
+<span class="font-technical-sm text-outline text-xs italic">Awaiting Action...</span>
+</div>
+</div>
+<!-- Central Interaction Hub -->
+<div class="mt-auto pb-12 flex flex-col items-center justify-center relative">
+<div class="flex items-center justify-center gap-8 w-full max-w-3xl">
+<!-- Left VU Meters / Stat Bars -->
+<div class="hidden md:flex gap-2 h-40 items-end">
+<div class="stat-bar w-2 rounded-t h-[60%]"></div>
+<div class="stat-bar w-2 rounded-t h-[40%]"></div>
+<div class="stat-bar w-2 rounded-t h-[85%]"></div>
+<div class="stat-bar w-2 rounded-t h-[55%]"></div>
+<div class="stat-bar w-2 rounded-t h-[70%]"></div>
+</div>
+<!-- Central 3D Sigil & Glow -->
+<div class="relative group cursor-pointer active:scale-95 transition-transform duration-200">
+<!-- Hexagonal Glow Area -->
+<div class="hex-container bg-gradient-to-t from-secondary/20 to-transparent p-1 animate-pulse-glow">
+<div class="hex-container bg-surface-container-highest/80 backdrop-blur-md w-48 h-56 flex items-center justify-center relative overflow-hidden">
+<!-- 3D Sigil Scene -->
+<!-- STITCH_THREEJS_START:ANIMATION_11 class="w-full h-full scale-125" -->
+<div class="w-full h-full scale-125" style="display:block;">
+<script src="https://ajax.googleapis.com/ajax/libs/threejs/r125/three.min.js"></script>
+<div id="threejs-container-ANIMATION_11" style="width:100%;height:100%"></div>
+<script>
+(function() {
+  const container = document.getElementById('threejs-container-ANIMATION_11');
+  const devicePixelRatio = window.devicePixelRatio || 1;
+  const container = document.getElementById('threejs-container-ANIMATION_N');
+const width = container.clientWidth || window.innerWidth;
+const height = container.clientHeight || window.innerHeight;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+camera.position.z = 5;
+
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+renderer.setSize(width, height);
+renderer.setPixelRatio(window.devicePixelRatio);
+container.appendChild(renderer.domElement);
+
+// Create the Monarch Sigil (Diamond/Hexagonal structure)
+const group = new THREE.Group();
+scene.add(group);
+
+// Outer diamond wireframe
+const outerGeom = new THREE.OctahedronGeometry(1.8, 0);
+const outerMat = new THREE.MeshPhongMaterial({
+    color: 0x8A2BE2,
+    emissive: 0x4B0082,
+    transparent: true,
+    opacity: 0.4,
+    wireframe: true
+});
+const outerSigil = new THREE.Mesh(outerGeom, outerMat);
+group.add(outerSigil);
+
+// Inner solid core
+const innerGeom = new THREE.OctahedronGeometry(0.8, 0);
+const innerMat = new THREE.MeshPhongMaterial({
+    color: 0x00FFFF,
+    emissive: 0x008080,
+    shininess: 100
+});
+const core = new THREE.Mesh(innerGeom, innerMat);
+group.add(core);
+
+// Rotating rings
+const ringGeom = new THREE.TorusGeometry(2.2, 0.02, 16, 100);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0x8A2BE2, transparent: true, opacity: 0.3 });
+const ring = new THREE.Mesh(ringGeom, ringMat);
+ring.rotation.x = Math.PI / 2;
+group.add(ring);
+
+const light = new THREE.PointLight(0x00FFFF, 2, 10);
+light.position.set(0, 0, 3);
+scene.add(light);
+
+const ambientLight = new THREE.AmbientLight(0x404040);
+scene.add(ambientLight);
+
+function animate() {
+    const time = Date.now() * 0.001;
+    requestAnimationFrame(animate);
+    
+    group.rotation.y += 0.01;
+    group.rotation.x = Math.sin(time * 0.5) * 0.2;
+    
+    // Breathing core
+    const s = 1.0 + Math.sin(time * 3.0) * 0.1;
+    core.scale.set(s, s, s);
+    
+    // Pulse opacity
+    outerMat.opacity = 0.3 + Math.sin(time * 2.0) * 0.2;
+    
+    renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+    const w = container.clientWidth || window.innerWidth;
+    const h = container.clientHeight || window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+});
+
+animate();
+})();
+</script>
+</div>
+<!-- STITCH_THREEJS_END:ANIMATION_11 -->
+</div>
+</div>
+<!-- Labels around Sigil -->
+<div class="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap">
+<p class="font-technical-sm text-[10px] text-secondary tracking-widest uppercase">Hold to Command</p>
+</div>
+</div>
+<!-- Right VU Meters / Stat Bars -->
+<div class="hidden md:flex gap-2 h-40 items-end">
+<div class="stat-bar w-2 rounded-t h-[70%]"></div>
+<div class="stat-bar w-2 rounded-t h-[90%]"></div>
+<div class="stat-bar w-2 rounded-t h-[45%]"></div>
+<div class="stat-bar w-2 rounded-t h-[65%]"></div>
+<div class="stat-bar w-2 rounded-t h-[50%]"></div>
+</div>
+</div>
+<!-- Footer Stats -->
+<div class="grid grid-cols-3 gap-12 mt-8 w-full max-w-xl text-center">
+<div class="flex flex-col">
+<span class="font-technical-sm text-[10px] text-outline uppercase tracking-widest">Strength</span>
+<span class="font-gothic text-xl text-secondary">248</span>
+</div>
+<div class="flex flex-col border-x border-outline-variant">
+<span class="font-technical-sm text-[10px] text-outline uppercase tracking-widest">Agility</span>
+<span class="font-gothic text-xl text-secondary">212</span>
+</div>
+<div class="flex flex-col">
+<span class="font-technical-sm text-[10px] text-outline uppercase tracking-widest">Intelligence</span>
+<span class="font-gothic text-xl text-secondary">195</span>
+</div>
+</div>
+</div>
+</main>
+<!-- Bottom Navigation Bar (Matching Shared Components) -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center h-20 pb-4 border-t border-outline bg-gradient-to-b from-surface-bright to-surface-dim shadow-[0_-4px_10px_rgba(0,0,0,0.5)]">
+<button class="flex flex-col items-center justify-center text-outline dark:text-outline opacity-60 hover:text-primary transition-colors active:scale-95 transition-transform duration-100">
+<span class="material-symbols-outlined text-2xl">settings_voice</span>
+<span class="font-label-caps text-[10px] mt-1">DECK</span>
+</button>
+<button class="flex flex-col items-center justify-center text-secondary dark:text-secondary scale-105 hover:text-primary transition-colors active:scale-95 transition-transform duration-100">
+<span class="material-symbols-outlined text-2xl" style="font-variation-settings: 'FILL' 1;">radio</span>
+<span class="font-label-caps text-[10px] mt-1">TUNER</span>
+</button>
+<button class="flex flex-col items-center justify-center text-outline dark:text-outline opacity-60 hover:text-primary transition-colors active:scale-95 transition-transform duration-100">
+<span class="material-symbols-outlined text-2xl">history</span>
+<span class="font-label-caps text-[10px] mt-1">HISTORY</span>
+</button>
+<button class="flex flex-col items-center justify-center text-outline dark:text-outline opacity-60 hover:text-primary transition-colors active:scale-95 transition-transform duration-100">
+<span class="material-symbols-outlined text-2xl">analytics</span>
+<span class="font-label-caps text-[10px] mt-1">SYSTEM</span>
+</button>
+</nav>
+<!-- Micro-Interactions -->
+<script>
+        // Audio visualization simulation
+        const bars = document.querySelectorAll('.stat-bar');
+        setInterval(() => {
+            bars.forEach(bar => {
+                const randomHeight = Math.floor(Math.random() * 80) + 20;
+                bar.style.height = `${randomHeight}%`;
+            });
+        }, 150);
+
+        // Subtle glow follow effect
+        document.addEventListener('mousemove', (e) => {
+            const x = (e.clientX / window.innerWidth) * 100;
+            const y = (e.clientY / window.innerHeight) * 100;
+            document.body.style.setProperty('--mouse-x', `${x}%`);
+            document.body.style.setProperty('--mouse-y', `${y}%`);
+        });
+    </script>
+</body></html>

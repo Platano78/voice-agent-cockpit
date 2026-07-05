@@ -1,0 +1,32 @@
+# Template for the speech-to-speech pipeline systemd unit.
+# Not installed automatically — copy to /etc/systemd/system/voice-agent.service,
+# fill in the variables below, then `systemctl daemon-reload && systemctl enable --now voice-agent`.
+#
+# Variables to substitute:
+#   ${RUN_USER}            - unix user to run the service as
+#   ${HOME_DIR}             - that user's home directory
+#   ${VENV_DIR}             - path to the speech-to-speech venv (e.g. $HOME_DIR/speech-to-speech-main/.venv)
+#   ${WORKING_DIR}          - working directory (repo checkout containing brains.json, etc.)
+#   ${WS_PORT}              - WebSocket port the cockpit connects to (default 8765)
+#   ${STT_BACKEND}          - STT backend (default parakeet-tdt)
+#   ${TTS_BACKEND}          - TTS backend (default pocket)
+#   ${TTS_VOICE}            - TTS voice name (default jean)
+#   ${LLM_BASE_URL}         - OpenAI-compatible chat-completions endpoint
+#   ${LLM_MODEL_NAME}       - model id served at that endpoint
+
+[Unit]
+Description=Voice agent speech-to-speech pipeline (ws :${WS_PORT})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+Environment=HOME=${HOME_DIR}
+WorkingDirectory=${WORKING_DIR}
+ExecStart=${VENV_DIR}/bin/speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port ${WS_PORT} --stt ${STT_BACKEND} --parakeet_tdt_device cpu --tts ${TTS_BACKEND} --pocket_tts_voice ${TTS_VOICE} --pocket_tts_device cpu --llm_backend chat-completions --responses_api_base_url ${LLM_BASE_URL} --responses_api_api_key dummy --model_name ${LLM_MODEL_NAME} --responses_api_stream --speculative_reopen_ms=-1 --unanswered_reopen_ms=-1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

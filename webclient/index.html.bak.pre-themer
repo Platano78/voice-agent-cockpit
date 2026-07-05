@@ -1,0 +1,925 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Voice Client</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%230a0a12'/><path d='M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z' fill='%2322d3ee'/><path d='M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.93V21H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-3.07A7 7 0 0 0 19 11Z' fill='%2322d3ee'/></svg>">
+<style>
+  :root {
+    --bg: #0a0a12;
+    --panel: #12121c;
+    --border: #262636;
+    --text: #e8e8f0;
+    --muted: #9494ab;
+    --accent: #22d3ee;
+    --accent2: #8b5cf6;
+    --ok: #34d399;
+    --bad: #f87171;
+    --warn: #fbbf24;
+    --rec: #ff5566;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px;
+    min-height: 100%;
+  }
+  button, input, select, textarea { font-family: inherit; }
+  button:focus-visible, [tabindex]:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  header {
+    width: 100%;
+    max-width: 640px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: 0.01em; }
+  #status {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  #dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted);
+    flex: 0 0 auto;
+    box-shadow: 0 0 0 rgba(0,0,0,0);
+  }
+  #dot.connected { background: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 70%, transparent); }
+  #dot.connecting { background: var(--warn); box-shadow: 0 0 10px color-mix(in srgb, var(--warn) 70%, transparent); }
+  #dot.error { background: var(--bad); box-shadow: 0 0 10px color-mix(in srgb, var(--bad) 70%, transparent); }
+  #statusText.shimmer {
+    background: linear-gradient(90deg, var(--muted) 0%, var(--text) 50%, var(--muted) 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 1.6s linear infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  main {
+    width: 100%;
+    max-width: 640px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: center;
+  }
+  .card {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 13px 15px;
+    transition: box-shadow 0.25s ease, border-color 0.25s ease;
+  }
+  .card .label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .card .body { font-size: 16px; min-height: 24px; word-wrap: break-word; }
+  #assistantText .body { color: var(--accent); }
+  #assistantText.speaking {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent), 0 0 20px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
+  /* ── PTT orb ─────────────────────────────────────────────────────── */
+  #pttWrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    margin-top: auto;
+    padding-top: 6px;
+  }
+  #ptt {
+    -webkit-user-select: none; user-select: none;
+    touch-action: none;
+    position: relative;
+    width: 112px;
+    height: 112px;
+    border: none;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 35%, var(--panel)), var(--panel) 70%);
+    color: var(--accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--border)), 0 0 22px color-mix(in srgb, var(--accent) 22%, transparent);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s, box-shadow 0.12s, transform 0.08s, color 0.12s;
+  }
+  #ptt:active { transform: scale(0.97); }
+  #ptt:disabled {
+    background: var(--panel);
+    color: var(--muted);
+    box-shadow: 0 0 0 1px var(--border);
+    cursor: not-allowed;
+  }
+  #ptt.recording {
+    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--rec) 45%, var(--panel)), var(--panel) 70%);
+    color: var(--rec);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--rec) 55%, var(--border)), 0 0 28px color-mix(in srgb, var(--rec) 35%, transparent);
+  }
+  .pttIcon { width: 40px; height: 40px; position: relative; z-index: 1; }
+  .pttPulse {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid var(--rec);
+    opacity: 0;
+    pointer-events: none;
+  }
+  #ptt.recording .pttPulse {
+    animation: pttPulse 1.4s ease-out infinite;
+  }
+  @keyframes pttPulse {
+    0% { transform: scale(1); opacity: 0.55; }
+    100% { transform: scale(1.65); opacity: 0; }
+  }
+  #pttCaption {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    min-height: 18px;
+    text-align: center;
+  }
+
+  /* ── Waveform ────────────────────────────────────────────────────── */
+  .waveform {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    height: 22px;
+    width: 100%;
+    max-width: 220px;
+  }
+  .wbar {
+    flex: 1 1 0;
+    max-width: 6px;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    opacity: 0.85;
+    transform: scaleY(0.08);
+    transform-origin: center;
+    transition: transform 0.09s ease-out;
+  }
+  #ptt.recording ~ #waveform .wbar { background: var(--rec); }
+
+  .hint { font-size: 12px; color: var(--muted); text-align: center; }
+
+  /* ── Diagnostics ─────────────────────────────────────────────────── */
+  .diagToggle {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: pointer;
+    padding: 6px;
+    align-self: center;
+  }
+  .diagToggle:hover { color: var(--text); }
+  #log {
+    font-size: 12px;
+    color: var(--muted);
+    max-width: 640px;
+    width: 100%;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 96px;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  #log[hidden] { display: none; }
+
+  /* ── Header controls ─────────────────────────────────────────────── */
+  #gearBtn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+  #gearBtn svg { width: 20px; height: 20px; }
+  #gearBtn:hover { background: var(--panel); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent); }
+
+  #settingsOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 9;
+  }
+  #settingsOverlay.open { opacity: 1; pointer-events: auto; }
+  #settingsPanel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100%;
+    width: min(340px, 100%);
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.55);
+    padding: 16px;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    z-index: 10;
+    overflow-y: auto;
+  }
+  #settingsPanel.open { transform: translateX(0); }
+  #settingsPanel .panelHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  #settingsPanel h2 { font-size: 15px; margin: 0; font-weight: 700; }
+  #settingsCloseBtn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  #settingsCloseBtn svg { width: 18px; height: 18px; }
+  #settingsCloseBtn:hover { background: var(--bg); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent); }
+  #settingsPanel .label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 18px 0 6px;
+  }
+  #brainStatus { font-size: 12px; color: var(--muted); }
+  .brainOption {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 5px 4px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .brainOption:hover { background: var(--bg); }
+  .brainOption input { margin: 0; flex: 0 0 auto; width: 18px; height: 18px; accent-color: var(--accent); }
+  .brainOption label { font-size: 14px; cursor: pointer; flex: 1 1 auto; }
+  .brainOption.disabled { cursor: not-allowed; }
+  .brainOption.disabled:hover { background: none; }
+  .brainOption.disabled label { color: var(--muted); cursor: not-allowed; }
+  #personaInput {
+    width: 100%;
+    min-height: 80px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    font: 13px/1.4 inherit;
+    resize: vertical;
+  }
+  #voiceSelect {
+    width: 100%;
+    min-height: 44px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    font: 13px/1.4 inherit;
+  }
+  .panelBtn {
+    width: 100%;
+    min-height: 44px;
+    padding: 8px;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .panelBtn:hover { background: var(--border); }
+  .panelBtn.primary { background: var(--accent); border-color: var(--accent); color: #05161a; font-weight: 700; }
+  .panelBtn.primary:hover { background: color-mix(in srgb, var(--accent) 85%, white); }
+
+  @media (prefers-reduced-motion: reduce) {
+    #statusText.shimmer, .pttPulse, #ptt.recording .pttPulse, .wbar, .card { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<header>
+  <h1>Voice Client</h1>
+  <div id="status"><span id="dot"></span><span id="statusText">idle</span></div>
+  <button id="gearBtn" title="Settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M19.4 13a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V19a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H4a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 5.6 9.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H10a1.65 1.65 0 0 0 1-1.51V4a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V10a1.65 1.65 0 0 0 1.51 1H20a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+</header>
+
+<div id="settingsOverlay"></div>
+<aside id="settingsPanel">
+  <div class="panelHead">
+    <h2>Settings</h2>
+    <button id="settingsCloseBtn" title="Close" aria-label="Close settings">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+  <div id="brainStatus">—</div>
+  <div class="label">Brain</div>
+  <div id="brainList"></div>
+  <div class="label">Persona</div>
+  <textarea id="personaInput" placeholder="Leave empty to restore default persona"></textarea>
+  <div class="label" id="voiceLabel" hidden>Voice</div>
+  <select id="voiceSelect" hidden></select>
+  <button class="panelBtn primary" id="applyPersonaBtn">Apply</button>
+  <button class="panelBtn" id="resetChatBtn">Reset chat</button>
+</aside>
+
+<main>
+  <div class="card" id="transcript">
+    <div class="label">You said</div>
+    <div class="body" id="transcriptBody">—</div>
+  </div>
+  <div class="card" id="assistantText">
+    <div class="label">Assistant</div>
+    <div class="body" id="assistantBody">—</div>
+  </div>
+
+  <div id="pttWrap">
+    <button id="ptt" disabled aria-label="Hold to talk">
+      <span class="pttPulse" aria-hidden="true"></span>
+      <svg class="pttIcon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" fill="currentColor"/>
+        <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.93V21H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-3.07A7 7 0 0 0 19 11Z" fill="currentColor"/>
+      </svg>
+    </button>
+    <div id="pttCaption">Connecting…</div>
+    <div class="waveform" id="waveform" aria-hidden="true">
+      <span class="wbar"></span>
+      <span class="wbar"></span>
+      <span class="wbar"></span>
+      <span class="wbar"></span>
+      <span class="wbar"></span>
+      <span class="wbar"></span>
+      <span class="wbar"></span>
+    </div>
+  </div>
+  <div class="hint">Hold to talk, or press and hold Space. Release to send.</div>
+  <button type="button" class="diagToggle" id="diagToggle">Diagnostics</button>
+  <div id="log" hidden></div>
+</main>
+
+<script>
+"use strict";
+
+// ── Config ───────────────────────────────────────────────────────────
+// Derive ws host at runtime so the SAME page works via LAN IP (desktop)
+// and Tailscale MagicDNS name / IP (phone). Never hardcode the host.
+const WS_URL = window.location.protocol === "https:" ? `wss://${window.location.hostname}:8443` : `ws://${window.location.hostname}:8765`;
+const TARGET_RATE = 16000;
+const TAIL_SILENCE_SEC = 1.0; // ~1s of int16 zeros to trip server-side VAD end-of-turn
+
+// ── DOM ──────────────────────────────────────────────────────────────
+const els = {
+  dot: document.getElementById("dot"),
+  statusText: document.getElementById("statusText"),
+  ptt: document.getElementById("ptt"),
+  pttCaption: document.getElementById("pttCaption"),
+  transcript: document.getElementById("transcriptBody"),
+  assistant: document.getElementById("assistantBody"),
+  assistantCard: document.getElementById("assistantText"),
+  waveform: document.getElementById("waveform"),
+  log: document.getElementById("log"),
+  diagToggle: document.getElementById("diagToggle"),
+  gearBtn: document.getElementById("gearBtn"),
+  settingsOverlay: document.getElementById("settingsOverlay"),
+  settingsPanel: document.getElementById("settingsPanel"),
+  settingsCloseBtn: document.getElementById("settingsCloseBtn"),
+  brainStatus: document.getElementById("brainStatus"),
+  brainList: document.getElementById("brainList"),
+  personaInput: document.getElementById("personaInput"),
+  voiceLabel: document.getElementById("voiceLabel"),
+  voiceSelect: document.getElementById("voiceSelect"),
+  applyPersonaBtn: document.getElementById("applyPersonaBtn"),
+  resetChatBtn: document.getElementById("resetChatBtn"),
+};
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  els.log.textContent = `[${t}] ${msg}\n` + els.log.textContent;
+}
+function setStatus(state, text) {
+  els.dot.className = state;          // "", connecting, connected, error
+  els.statusText.textContent = text;
+  els.statusText.classList.toggle("shimmer", text.indexOf("processing") !== -1);
+}
+
+// ── Diagnostics (log hidden by default; not persisted) ──────────────
+els.diagToggle.addEventListener("click", () => {
+  els.log.hidden = !els.log.hidden;
+});
+
+// ── Settings panel (brain + persona control) ───────────────────────────
+function openSettings() {
+  els.settingsPanel.classList.add("open");
+  els.settingsOverlay.classList.add("open");
+}
+function closeSettings() {
+  els.settingsPanel.classList.remove("open");
+  els.settingsOverlay.classList.remove("open");
+}
+els.gearBtn.addEventListener("click", () => {
+  els.settingsPanel.classList.contains("open") ? closeSettings() : openSettings();
+});
+els.settingsOverlay.addEventListener("click", closeSettings);
+els.settingsCloseBtn.addEventListener("click", closeSettings);
+
+function renderConfigState(ev) {
+  const active = ev.brains.find((b) => b.name === ev.active_brain);
+  els.brainStatus.textContent = `Active: ${active ? active.label : ev.active_brain}`;
+
+  els.brainList.innerHTML = "";
+  ev.brains.forEach((b) => {
+    const row = document.createElement("div");
+    row.className = "brainOption" + (b.available ? "" : " disabled");
+    const id = "brain_" + b.name;
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "brain";
+    input.id = id;
+    input.value = b.name;
+    input.checked = b.name === ev.active_brain;
+    input.disabled = !b.available;
+    input.addEventListener("change", () => {
+      if (input.checked && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "config_set", brain: b.name }));
+      }
+    });
+    const label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = b.label + (b.note ? ` — ${b.note}` : "");
+    row.appendChild(input);
+    row.appendChild(label);
+    // Whole row is a tap target ≥44px tall; clicks on the input/label already
+    // toggle natively via htmlFor, this just extends that to the row's padding.
+    row.addEventListener("click", (e) => {
+      if (e.target === input || e.target === label || input.disabled) return;
+      input.click();
+    });
+    els.brainList.appendChild(row);
+  });
+
+  // Don't clobber text the user is actively editing.
+  if (document.activeElement !== els.personaInput) {
+    els.personaInput.value = ev.persona || "";
+  }
+
+  const voices = ev.voices || [];
+  const hasVoices = voices.length > 0;
+  els.voiceLabel.hidden = !hasVoices;
+  els.voiceSelect.hidden = !hasVoices;
+  if (hasVoices && document.activeElement !== els.voiceSelect) {
+    els.voiceSelect.innerHTML = "";
+    voices.forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      opt.selected = name === ev.voice;
+      els.voiceSelect.appendChild(opt);
+    });
+  }
+}
+
+els.applyPersonaBtn.addEventListener("click", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", persona: els.personaInput.value }));
+  }
+});
+els.resetChatBtn.addEventListener("click", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", reset_chat: true }));
+  }
+});
+els.voiceSelect.addEventListener("change", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", voice: els.voiceSelect.value }));
+  }
+});
+
+// ── Wake lock ────────────────────────────────────────────────────────
+// Keep the screen on while connected so a mid-conversation dim doesn't kill
+// the mic/audio graph. Best-effort: unsupported browsers no-op silently.
+let wakeLock = null;
+async function acquireWakeLock() {
+  try {
+    if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen");
+  } catch {}
+}
+function releaseWakeLock() {
+  try { wakeLock && wakeLock.release(); } catch {}
+  wakeLock = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && ws && ws.readyState === WebSocket.OPEN) {
+    acquireWakeLock();
+  }
+});
+
+// ── WebSocket ────────────────────────────────────────────────────────
+let ws = null;
+
+function connect() {
+  setStatus("connecting", "connecting…");
+  els.ptt.disabled = true;
+  els.pttCaption.textContent = "Connecting…";
+
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    setStatus("connected", "connected");
+    els.ptt.disabled = false;
+    els.pttCaption.textContent = "Hold to talk";
+    log("ws open " + WS_URL);
+    ws.send(JSON.stringify({ type: "config_get" }));
+    acquireWakeLock();
+  };
+  ws.onclose = () => {
+    setStatus("error", "disconnected — retrying");
+    els.ptt.disabled = true;
+    els.pttCaption.textContent = "Reconnecting…";
+    log("ws closed; retrying in 2s");
+    releaseWakeLock();
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => { log("ws error"); };
+  ws.onmessage = (ev) => {
+    // Mixed types on the same socket: string => JSON PipelineEvent, binary => TTS PCM.
+    if (typeof ev.data === "string") {
+      handleEvent(ev.data);
+    } else {
+      // ArrayBuffer (binaryType='arraybuffer'). Int16 16k mono PCM.
+      enqueuePlayback(ev.data);
+    }
+  };
+}
+
+function handleEvent(text) {
+  let ev;
+  try { ev = JSON.parse(text); } catch { log("bad json: " + text.slice(0, 120)); return; }
+  // NOTE: server discriminator field is `type` (not `event_type`).
+  switch (ev.type) {
+    case "transcription_completed":
+      els.transcript.textContent = ev.transcript || "—";
+      break;
+    case "assistant_text":
+      els.assistant.textContent = ev.text || "—";
+      break;
+    case "partial_transcription":
+      // live partials: show in transcript as it grows
+      if (ev.delta) els.transcript.textContent = (els.transcript.textContent === "—" ? "" : els.transcript.textContent) + ev.delta;
+      break;
+    case "token_usage":
+      log(`tokens in=${ev.input_tokens} out=${ev.output_tokens}`);
+      break;
+    case "config_state":
+      renderConfigState(ev);
+      break;
+    case "config_ack":
+      if (ev.ok) {
+        log(`brain=${ev.active_brain} model=${ev.model}`);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "config_get" })); // resync panel (brain/persona/reset all land here)
+        }
+      } else {
+        log("config_set failed: " + ev.error);
+      }
+      break;
+    default:
+      // speech_started / speech_stopped / etc — keep quiet but traceable
+      log("event: " + ev.type);
+  }
+}
+
+// ── Playback (gapless int16 16k) ─────────────────────────────────────
+let playCtx = null;
+let nextStartTime = 0;
+const liveSources = new Set();
+
+function updateSpeakingIndicator() {
+  els.assistantCard.classList.toggle("speaking", liveSources.size > 0);
+}
+
+function ensurePlayCtx() {
+  if (!playCtx) {
+    playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+  }
+  if (playCtx.state === "suspended") playCtx.resume();
+  return playCtx;
+}
+
+function enqueuePlayback(arrayBuffer) {
+  const ctx = ensurePlayCtx();
+  const int16 = new Int16Array(arrayBuffer);
+  if (int16.length === 0) return;
+  const f32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+
+  // Buffer is authored at 16k; AudioBufferSourceNode resamples to ctx rate if they differ.
+  const buf = ctx.createBuffer(1, f32.length, TARGET_RATE);
+  buf.copyToChannel(f32, 0);
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+
+  const now = ctx.currentTime;
+  if (nextStartTime < now) nextStartTime = now + 0.02; // small priming gap
+  src.start(nextStartTime);
+  nextStartTime += buf.duration;
+
+  liveSources.add(src);
+  updateSpeakingIndicator();
+  src.onended = () => { liveSources.delete(src); updateSpeakingIndicator(); };
+}
+
+function flushPlayback() {
+  // Barge-in: stop everything currently scheduled/playing.
+  for (const s of liveSources) { try { s.stop(); } catch {} }
+  liveSources.clear();
+  nextStartTime = 0;
+  updateSpeakingIndicator();
+}
+
+// ── Mic capture ──────────────────────────────────────────────────────
+// Primary path: AudioContext({sampleRate:16000}) so the graph runs at 16k and
+// getUserMedia audio is resampled into it by the browser — no manual resampling,
+// worklet just converts Float32→Int16. Fallback: if the browser refuses 16k
+// (e.g. Safari ignores the option), the worklet decimates ctx.rate → 16k.
+let micStream = null;
+let micCtx = null;
+let micNode = null;
+let capturing = false;   // mic graph is live
+let isHeld = false;      // button physically held — the ONLY gate on outbound audio
+
+// Rolling bar-graph waveform driven by the worklet's peak samples.
+const wbars = Array.from(els.waveform.querySelectorAll(".wbar"));
+const wbarHistory = new Array(wbars.length).fill(0);
+function pushWaveform(peak) {
+  wbarHistory.push(Math.max(0.08, Math.min(1, peak * 3.2)));
+  wbarHistory.shift();
+  wbars.forEach((bar, i) => { bar.style.transform = `scaleY(${wbarHistory[i]})`; });
+}
+function resetWaveform() {
+  wbarHistory.fill(0.08);
+  wbars.forEach((bar) => { bar.style.transform = "scaleY(0.08)"; });
+}
+
+// AudioWorklet processor, delivered via Blob so the page stays fully self-contained
+// (no external file to fetch — works offline beyond reaching the box).
+const WORKLET_SRC = `
+class Cap extends AudioWorkletProcessor {
+  constructor(opts) {
+    super();
+    // decimation factor = inputRate / 16000 (1 when context is already 16k)
+    this.decim = Math.max(1, Math.round(sampleRate / 16000));
+    this._acc = 0;
+    this._sum = 0;
+    this._count = 0;
+    this._out = [];
+  }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    let peak = 0;
+    for (let i = 0; i < ch.length; i++) {
+      const v = ch[i];
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+      if (this.decim === 1) {
+        this._out.push(v);
+      } else {
+        // box-average decimation (cheap anti-alias) — fine for voice
+        this._sum += v;
+        this._count++;
+        if (this._count >= this.decim) {
+          this._out.push(this._sum / this._count);
+          this._sum = 0; this._count = 0;
+        }
+      }
+    }
+    // flush accumulated samples as Int16 in ~20ms batches (320 samples @16k)
+    if (this._out.length >= 320) {
+      const n = this._out.length;
+      const i16 = new Int16Array(n);
+      for (let i = 0; i < n; i++) {
+        let s = this._out[i];
+        if (s > 1) s = 1; else if (s < -1) s = -1;
+        i16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+      this._out.length = 0;
+      this.port.postMessage({ pcm: i16.buffer, peak }, [i16.buffer]);
+    } else {
+      this.port.postMessage({ peak });
+    }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);
+`;
+
+async function startCapture() {
+  if (capturing) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { log("not connected"); return; }
+  capturing = true;
+
+  // barge-in: kill any assistant audio the moment the user starts talking
+  flushPlayback();
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    capturing = false;
+    setStatus("error", "mic denied");
+    log("getUserMedia failed: " + e.message);
+    return;
+  }
+
+  // Released during the mic-permission await? Abort cleanly — never leave a live graph.
+  if (!isHeld) { teardownMic(); log("released during setup; aborted"); return; }
+
+  // Prefer a 16k context so no resampling is needed.
+  try {
+    micCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+  } catch {
+    micCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (micCtx.state === "suspended") await micCtx.resume();
+  if (micCtx.sampleRate !== TARGET_RATE) {
+    log(`ctx rate ${micCtx.sampleRate}Hz → worklet decimates to 16k`);
+  }
+
+  const src = micCtx.createMediaStreamSource(micStream);
+
+  const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+  try {
+    await micCtx.audioWorklet.addModule(blobUrl);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+
+  // Released while the worklet module was loading? Abort — don't wire up a live graph.
+  if (!isHeld) { teardownMic(); log("released during setup; aborted"); return; }
+
+  micNode = new AudioWorkletNode(micCtx, "cap");
+  micNode.port.onmessage = (e) => {
+    const d = e.data;
+    if (d.peak !== undefined) {
+      pushWaveform(d.peak);
+    }
+    // TRUE push-to-talk: only stream while the button is actively held.
+    // Frames produced outside a hold (or after release) are dropped, never sent.
+    if (d.pcm && isHeld && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(d.pcm); // raw binary int16 16k mono
+    }
+  };
+  src.connect(micNode);
+  // Worklet must be pulled by the graph; connect to a muted gain → destination.
+  const sink = micCtx.createGain();
+  sink.gain.value = 0;
+  micNode.connect(sink);
+  sink.connect(micCtx.destination);
+
+  els.ptt.classList.add("recording");
+  els.pttCaption.textContent = "Listening… (release to send)";
+  setStatus("connected", "recording");
+  log("capture start @ " + micCtx.sampleRate + "Hz");
+}
+
+// Tear down the mic graph and release the device. Safe to call with partial/null state.
+function teardownMic() {
+  try { if (micNode) micNode.disconnect(); } catch {}
+  try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch {}
+  try { if (micCtx) micCtx.close(); } catch {}
+  micNode = null; micStream = null; micCtx = null;
+  capturing = false;
+}
+
+async function stopCapture() {
+  els.ptt.classList.remove("recording");
+  els.pttCaption.textContent = "Hold to talk";
+  resetWaveform();
+  // If we never actually got a live graph up (very quick tap), there's nothing to
+  // flush and no turn to end — just make sure the device is released.
+  if (!capturing) { teardownMic(); return; }
+  setStatus("connected", "processing…");
+
+  // Send ~1s of int16 zeros to trip the server-side Silero VAD end-of-turn.
+  // Server rebuffers into 512-sample chunks, so our frame size is irrelevant —
+  // send in ~20ms frames just to mimic the streaming cadence.
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const total = Math.floor(TARGET_RATE * TAIL_SILENCE_SEC);
+    const frame = 320;
+    const zeros = new Int16Array(frame); // reusable zero-filled frame
+    for (let i = 0; i < total; i += frame) {
+      const n = Math.min(frame, total - i);
+      ws.send(n === frame ? zeros.buffer.slice(0) : new Int16Array(n).buffer);
+    }
+  }
+
+  teardownMic();
+  log("capture stop; sent tail silence");
+}
+
+// ── PTT button: mouse + touch ────────────────────────────────────────
+// isHeld is set SYNCHRONOUSLY here (before the async startCapture runs) and is the
+// single source of truth for "should audio be flowing". The worklet gates ws.send on
+// it, so no frame can escape unless the button is down at that instant.
+const ptt = els.ptt;
+function press(e) { e.preventDefault(); isHeld = true; startCapture(); }
+function release(e) { if (e) e.preventDefault(); isHeld = false; stopCapture(); }
+// Mouse — release on window so dragging off the button still ends the turn.
+ptt.addEventListener("mousedown", press);
+window.addEventListener("mouseup", release);
+// Touch (phone)
+ptt.addEventListener("touchstart", press, { passive: false });
+ptt.addEventListener("touchend", release, { passive: false });
+ptt.addEventListener("touchcancel", release);
+
+// ── Keyboard PTT: hold Space ─────────────────────────────────────────
+function isTypingTarget(t) {
+  const tag = t && t.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "Space" || e.repeat) return;
+  if (isTypingTarget(e.target) || els.settingsPanel.classList.contains("open")) return;
+  if (isHeld) return;
+  press(e);
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code !== "Space") return;
+  if (!isHeld) return; // no active hold — nothing to do, also keeps textarea spaces normal
+  release(e);
+});
+
+// ── Go ───────────────────────────────────────────────────────────────
+connect();
+</script>

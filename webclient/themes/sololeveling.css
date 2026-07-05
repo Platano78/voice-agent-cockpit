@@ -1,0 +1,625 @@
+/* Shadow Monarch System — Solo Leveling inspired holographic dark theme.
+   Near-black indigo void, translucent System-window panels, thin cyan/violet
+   glow borders, angular near-zero-radius cuts, quest-log label framing.
+   Reference implementation for the standardized fidelity primitives — see
+   THEME-SPEC.md's "Theme primitives" section for what each one is for. */
+
+/* ── Font primitive: subsetted Cinzel (SIL OFL, see fonts/OFL.txt), Latin
+   basic + digits + punctuation only, same-origin themes/fonts/. Only these
+   two faces exist (700/900) — every rule below that sets --font-display
+   pins an explicit font-weight so the browser never has to guess a match. */
+@font-face {
+  font-family: "Cinzel";
+  src: url("fonts/Cinzel-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Cinzel";
+  src: url("fonts/Cinzel-Black.woff2") format("woff2");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+[data-theme="sololeveling"] {
+  --bg: #05050c;
+  --surface: rgba(14, 15, 32, 0.72);
+  --surface-2: rgba(10, 11, 26, 0.6);
+  --border: rgba(139, 92, 246, 0.32);
+  --text: #e7ecff;
+  --text-muted: rgba(198, 208, 255, 0.56);
+  --accent: #22d9ff;
+  --accent-2: #8b5cf6;
+  --rec: #ff2f6d;
+  --ok: #35e3a0;
+  --warn: #ffcc33;
+  --bad: #ff3355;
+  --radius: 2px;
+  --radius-sm: 2px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-display: "Cinzel", Didot, "Big Caslon", "Palatino Linotype", Georgia, serif;
+  --font-mono: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Consolas, monospace;
+  --tracking-label: 0.2em;
+  --shadow-card: 0 0 0 1px color-mix(in srgb, var(--accent-2) 30%, transparent), 0 0 26px color-mix(in srgb, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255,255,255,0.03);
+  --ptt-shadow-idle: 0 0 0 1px var(--accent-2), 0 0 32px color-mix(in srgb, var(--accent-2) 45%, transparent), 0 0 60px color-mix(in srgb, var(--accent) 15%, transparent);
+  --ptt-shadow-rec: 0 0 0 2px var(--rec), 0 0 44px color-mix(in srgb, var(--rec) 55%, transparent), 0 0 80px color-mix(in srgb, var(--accent-2) 30%, transparent);
+  --ptt-size: 108px;
+  --ptt-radius: 6px;
+}
+
+/* ── #fxBack: living void-mist backdrop. Layered indigo/violet/cyan bloom +
+   faint grid, passed through the shared #vaMist SVG filter (feTurbulence +
+   feDisplacementMap + feGaussianBlur — pre-blurred, static). Per the perf
+   laws: never animate blur — only opacity/transform animate here, and
+   will-change promotes them. Brightness reads the --level bus (global via
+   document.documentElement — see THEME-SPEC.md), so this genuinely pulses
+   with live mic input. Replaces the old body-background gradients from the
+   palette-only pass — #fxBack is the one living-background layer now, body
+   falls through to flat --bg. ── */
+[data-theme="sololeveling"] #fxBack {
+  display: block;
+  background:
+    radial-gradient(ellipse 900px 650px at 18% -8%, rgba(139, 92, 246, 0.32), transparent 60%),
+    radial-gradient(ellipse 760px 620px at 102% 105%, rgba(34, 217, 255, 0.22), transparent 62%),
+    radial-gradient(ellipse 640px 520px at 55% 45%, rgba(76, 20, 130, 0.30), transparent 68%),
+    repeating-linear-gradient(0deg, rgba(139, 92, 246, 0.025) 0px, rgba(139, 92, 246, 0.025) 1px, transparent 1px, transparent 32px),
+    repeating-linear-gradient(90deg, rgba(139, 92, 246, 0.025) 0px, rgba(139, 92, 246, 0.025) 1px, transparent 1px, transparent 32px),
+    var(--bg);
+  filter: url(#vaMist) brightness(calc(1 + var(--level, 0) * 0.35));
+  animation: sololevelingMistDrift 48s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+@keyframes sololevelingMistDrift {
+  0%, 100% { transform: scale(1.06) translate(0, 0); opacity: 0.88; }
+  50% { transform: scale(1.14) translate(-2%, 1.5%); opacity: 1; }
+}
+
+/* ── #bannerMount: angular System "NOTIFICATION" banner ── */
+[data-theme="sololeveling"] #bannerMount {
+  display: block;
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto 14px;
+  height: 32px;
+  clip-path: polygon(6% 0, 94% 0, 100% 50%, 94% 100%, 6% 100%, 0 50%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent-2) 24%, transparent) 22%, color-mix(in srgb, var(--accent) 16%, transparent) 50%, color-mix(in srgb, var(--accent-2) 24%, transparent) 78%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+[data-theme="sololeveling"] #bannerMount::before {
+  content: "N O T I F I C A T I O N";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+@media (min-width: 1024px) {
+  [data-theme="sololeveling"] #bannerMount { max-width: 1240px; height: 38px; }
+  [data-theme="sololeveling"] #bannerMount::before { font-size: 14px; }
+}
+
+/* ── Angular System-window panels: near-zero radius cut corners ──
+   #settingsPanel is excluded from `position: relative` — it's already
+   `position: fixed` in the base page for its open/close translateX
+   mechanic, and `relative` would silently override that fixed positioning.
+   clip-path/backdrop-filter don't need relative to work on a fixed box.
+   #avatarPane already carries `position: relative` from the base page (it
+   needs it for #avatarToggle + .panelFrame regardless of theme) — the
+   `position: relative` below is a harmless restatement, same as the other
+   three selectors that also already happen to need it. ── */
+[data-theme="sololeveling"] .card,
+[data-theme="sololeveling"] #historyRail,
+[data-theme="sololeveling"] #sessionRail,
+[data-theme="sololeveling"] #avatarPane {
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+  position: relative;
+  backdrop-filter: blur(6px);
+}
+[data-theme="sololeveling"] #settingsPanel {
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+  backdrop-filter: blur(6px);
+}
+[data-theme="sololeveling"] .card::before,
+[data-theme="sololeveling"] #historyRail::before,
+[data-theme="sololeveling"] #sessionRail::before,
+[data-theme="sololeveling"] #avatarPane::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent) 20%, var(--accent-2) 60%, transparent);
+  background-size: 200% 100%;
+  opacity: 0.65;
+  animation: sololevelingSweep 3.2s linear infinite;
+}
+
+/* ── .panelFrame: layered System-window chrome — a second inset line inside
+   the card's own glow border, plus glowing corner accent bars. This is the
+   signature "System window" look the palette-only pass was missing; the
+   base .card border (--shadow-card / clip-path above) stays untouched, this
+   layers an inner frame on top of it via the dedicated inert mount point.
+   Ref: custom-ref-sololeveling.html .glow-border + corner accent divs. ── */
+[data-theme="sololeveling"] .panelFrame {
+  display: block;
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    inset 0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+    inset 0 0 0 5px color-mix(in srgb, var(--accent-2) 30%, transparent);
+}
+[data-theme="sololeveling"] .panelFrame::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;
+  width: 28px; height: 2px;
+  background: var(--accent-2);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-2) 70%, transparent);
+}
+[data-theme="sololeveling"] .panelFrame::after {
+  content: "";
+  position: absolute;
+  bottom: 0; right: 0;
+  width: 2px; height: 28px;
+  background: var(--accent-2);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-2) 70%, transparent);
+}
+[data-theme="sololeveling"] body:has(#ptt.recording) .panelFrame {
+  animation: sololevelingFramePulse 1.4s ease-in-out infinite;
+}
+@keyframes sololevelingFramePulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--rec) 55%, transparent),
+      inset 0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+      inset 0 0 0 5px color-mix(in srgb, var(--rec) 35%, transparent);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--rec) 85%, transparent),
+      inset 0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+      inset 0 0 0 5px color-mix(in srgb, var(--rec) 55%, transparent);
+  }
+}
+
+/* ── Quest-log label framing ── */
+[data-theme="sololeveling"] .card .label,
+[data-theme="sololeveling"] #historyRail .label,
+[data-theme="sololeveling"] #sessionRail .label,
+[data-theme="sololeveling"] #settingsPanel .label {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+[data-theme="sololeveling"] .card .label::before,
+[data-theme="sololeveling"] #historyRail .label::before,
+[data-theme="sololeveling"] #sessionRail .label::before { content: "【 "; color: var(--accent-2); }
+[data-theme="sololeveling"] .card .label::after,
+[data-theme="sololeveling"] #historyRail .label::after,
+[data-theme="sololeveling"] #sessionRail .label::after { content: " 】"; color: var(--accent-2); }
+
+[data-theme="sololeveling"] #assistantText .body {
+  color: var(--accent);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+[data-theme="sololeveling"] #assistantText.speaking {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card), 0 0 30px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+[data-theme="sololeveling"] #statusText.shimmer {
+  background: linear-gradient(90deg, var(--text-muted) 0%, var(--accent) 50%, var(--text-muted) 100%);
+  background-size: 200% 100%;
+}
+
+/* ── Header: Cinzel Black, gothic-poster treatment ── */
+[data-theme="sololeveling"] h1 {
+  font-family: var(--font-display);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+
+/* ── PTT orb: octagonal cut, violet idle glow, crimson danger while recording ── */
+[data-theme="sololeveling"] #ptt {
+  clip-path: polygon(18% 0, 82% 0, 100% 18%, 100% 82%, 82% 100%, 18% 100%, 0 82%, 0 18%);
+  background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent-2) 40%, var(--surface)), var(--surface) 70%);
+  perspective: 340px;
+}
+[data-theme="sololeveling"] #ptt.recording {
+  background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--rec) 48%, var(--surface)), var(--surface) 70%);
+}
+[data-theme="sololeveling"] .pttPulse {
+  clip-path: polygon(18% 0, 82% 0, 100% 18%, 100% 82%, 82% 100%, 18% 100%, 0 82%, 0 18%);
+  border-color: var(--accent-2);
+}
+[data-theme="sololeveling"] #ptt.recording .pttPulse { border-color: var(--rec); }
+[data-theme="sololeveling"] #pttCaption::before { content: "⚡ "; color: var(--accent-2); }
+
+/* ── #pttDeco: CSS-only 3D octahedron sigil, replacing the old flat rotating
+   diamond. #pttDeco is the preserve-3d stage; #ptt supplies `perspective`
+   (the 3D viewing context for its descendants); each of the 8 static <i>
+   children is one triangular face (clip-path triangle), positioned into an
+   upper/lower pyramid pair via rotateY (90° steps around the vertical axis)
+   + rotateX (tilt) + translateZ — a standard CSS bipyramid recipe. The
+   whole stage spins by animating #pttDeco's own rotateY; the ::before
+   pseudo-element is a separate "core" glow at the center (translateZ(0)),
+   breathing independently of the face rotation. Violet wireframe look via
+   borders + gradients per the design brief; crimson swap while recording
+   mirrors the old ring's behavior. Reduced motion: rotation + breathing
+   stop, the glow (box-shadow, not animated) stays. ── */
+[data-theme="sololeveling"] #pttDeco {
+  display: block;
+  position: absolute;
+  inset: 26%;
+  transform-style: preserve-3d;
+  animation: sololevelingSigilSpin 16s linear infinite;
+  pointer-events: none;
+}
+[data-theme="sololeveling"] #pttDeco i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--accent-2) 55%, transparent), color-mix(in srgb, var(--accent) 35%, transparent));
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-2) 45%, transparent);
+  opacity: 0.72;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+/* Upper pyramid (apex up): 4 faces, 90° apart around the vertical axis. */
+[data-theme="sololeveling"] #pttDeco i:nth-child(1) { transform: rotateY(0deg)   rotateX(35deg) translateZ(18px); }
+[data-theme="sololeveling"] #pttDeco i:nth-child(2) { transform: rotateY(90deg)  rotateX(35deg) translateZ(18px); }
+[data-theme="sololeveling"] #pttDeco i:nth-child(3) { transform: rotateY(180deg) rotateX(35deg) translateZ(18px); }
+[data-theme="sololeveling"] #pttDeco i:nth-child(4) { transform: rotateY(270deg) rotateX(35deg) translateZ(18px); }
+/* Lower pyramid (apex down, 180° flip): same 4 headings, mirrored tilt. */
+[data-theme="sololeveling"] #pttDeco i:nth-child(5) { transform: rotateY(0deg)   rotateX(145deg) translateZ(18px); }
+[data-theme="sololeveling"] #pttDeco i:nth-child(6) { transform: rotateY(90deg)  rotateX(145deg) translateZ(18px); }
+[data-theme="sololeveling"] #pttDeco i:nth-child(7) { transform: rotateY(180deg) rotateX(145deg) translateZ(18px); }
+[data-theme="sololeveling"] #pttDeco i:nth-child(8) { transform: rotateY(270deg) rotateX(145deg) translateZ(18px); }
+@keyframes sololevelingSigilSpin {
+  from { transform: rotateY(0deg); }
+  to { transform: rotateY(360deg); }
+}
+/* Breathing cyan core — a center "face", not one of the 8, sitting at the
+   octahedron's middle (translateZ(0)). Brightness reads the global --level
+   bus, so it genuinely brightens with live mic input (see THEME-SPEC.md). */
+[data-theme="sololeveling"] #pttDeco::before {
+  content: "";
+  position: absolute;
+  inset: 38%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent), transparent 70%);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 70%, transparent);
+  transform: translateZ(0);
+  animation: sololevelingCoreBreathe 2.6s ease-in-out infinite;
+  filter: brightness(calc(1 + var(--level, 0) * 0.6));
+}
+@keyframes sololevelingCoreBreathe {
+  0%, 100% { transform: translateZ(0) scale(0.85); opacity: 0.7; }
+  50% { transform: translateZ(0) scale(1.1); opacity: 1; }
+}
+[data-theme="sololeveling"] #ptt.recording #pttDeco i {
+  background: linear-gradient(160deg, color-mix(in srgb, var(--rec) 55%, transparent), color-mix(in srgb, var(--rec) 35%, transparent));
+  border-color: color-mix(in srgb, var(--rec) 55%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rec) 55%, transparent);
+}
+[data-theme="sololeveling"] #ptt.recording #pttDeco::before {
+  background: radial-gradient(circle, var(--rec), transparent 70%);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--rec) 75%, transparent);
+}
+
+/* ── .statCol: thin animated stat bars flanking the orb, desktop only (the
+   shared base rule already keeps them display:none on mobile — this media
+   query is what turns them on, never the reverse). #pttWrap gets
+   `position: relative` here (scoped to this theme) so the columns can be
+   positioned absolutely off it, matching the .panelFrame/#meterChrome
+   convention of the parent opting into `relative` itself. ── */
+@media (min-width: 1024px) {
+  [data-theme="sololeveling"] #pttWrap { position: relative; }
+  [data-theme="sololeveling"] .statCol {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 54px;
+  }
+  [data-theme="sololeveling"] #statColL { right: calc(50% + (var(--ptt-size) / 2) + 30px); }
+  [data-theme="sololeveling"] #statColR { left: calc(50% + (var(--ptt-size) / 2) + 30px); }
+  [data-theme="sololeveling"] .statCol::before,
+  [data-theme="sololeveling"] .statCol::after {
+    content: "";
+    display: block;
+    height: 5px;
+    border-radius: 1px;
+    transform-origin: left center;
+    background: linear-gradient(90deg, var(--accent-2), var(--accent));
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent);
+    opacity: calc(0.55 + var(--level, 0) * 0.45);
+    animation: sololevelingStatPulse 3.2s ease-in-out infinite;
+  }
+  [data-theme="sololeveling"] .statCol::after { animation-delay: 1.1s; }
+}
+@keyframes sololevelingStatPulse {
+  0%, 100% { transform: scaleX(0.55); }
+  50% { transform: scaleX(1); }
+}
+
+/* ── Waveform: thin vertical mana-bars, violet→cyan gradient + glow (stat-bar
+   aesthetic per custom-ref-sololeveling.html .stat-bar), crimson while
+   recording. #meterChrome / needle deliberately NOT used here. ── */
+[data-theme="sololeveling"] .wbar {
+  max-width: 4px;
+  border-radius: 2px;
+  background: linear-gradient(0deg, var(--accent-2) 0%, var(--accent) 100%);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+[data-theme="sololeveling"] #ptt.recording ~ #waveform .wbar {
+  background: linear-gradient(0deg, var(--rec) 0%, color-mix(in srgb, var(--rec) 60%, white) 100%);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rec) 65%, transparent);
+}
+
+/* ── Drawer, swatches, inputs ── */
+[data-theme="sololeveling"] .themeSwatch.active .swatchDot {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent-2);
+}
+[data-theme="sololeveling"] #brainStatus,
+[data-theme="sololeveling"] .brainOption label { font-family: var(--font-mono); }
+[data-theme="sololeveling"] .brainOption:hover { background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
+[data-theme="sololeveling"] #personaInput,
+[data-theme="sololeveling"] #voiceSelect {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+[data-theme="sololeveling"] .panelBtn.primary {
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  border-color: var(--accent-2);
+  color: #05050c;
+}
+
+/* ── Cockpit: quest card — 【 QUEST 】header via ::before, angular System
+   window frame consistent with the .card cut-corner treatment, status
+   vocabulary keyed off [data-cockpit-status]. The header keeps its real
+   "TASK" text node (font-size: 0, still in the accessible tree) and shows
+   "【 QUEST 】" via a sized ::before, same technique as the label bracket
+   wrap below but a full word swap per the design brief. ── */
+[data-theme="sololeveling"] #questCard {
+  position: relative;
+  padding: 10px;
+  margin: -10px -10px 16px;
+  border: none;
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent),
+    inset 0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+    inset 0 0 0 5px color-mix(in srgb, var(--accent-2) 25%, transparent);
+}
+[data-theme="sololeveling"] .questHeader {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0;
+}
+[data-theme="sololeveling"] .questHeader::before {
+  content: "【 QUEST 】";
+  font-size: 11px;
+  letter-spacing: var(--tracking-label);
+}
+[data-theme="sololeveling"] .questTaskText { font-family: var(--font-mono); }
+[data-theme="sololeveling"] .questStatusLine { color: var(--accent-2); }
+[data-theme="sololeveling"] #questCard[data-cockpit-status="running"] .questStatusLine,
+[data-theme="sololeveling"] #questCard[data-cockpit-status="sent"] .questStatusLine {
+  color: var(--accent);
+  animation: sololevelingQuestPulse 1.6s ease-in-out infinite;
+}
+@keyframes sololevelingQuestPulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}
+[data-theme="sololeveling"] #questCard[data-cockpit-status="done"] .questStatusLine::after {
+  content: " — CLEAR";
+  color: var(--ok);
+  font-weight: 700;
+}
+[data-theme="sololeveling"] #questCard[data-cockpit-status="error"] .questStatusLine::after {
+  content: " — FAILED";
+  color: var(--bad);
+  font-weight: 700;
+}
+[data-theme="sololeveling"] .questUnreachable { color: var(--bad); font-family: var(--font-mono); }
+[data-theme="sololeveling"] .questStepRole { color: var(--accent-2); }
+[data-theme="sololeveling"] .questStepText { font-family: var(--font-mono); }
+[data-theme="sololeveling"] .questResult {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+[data-theme="sololeveling"] #questCard[data-cockpit-status="error"] .questResult { color: var(--bad); }
+
+/* ── Cockpit: approval gate banner as a System NOTIFICATION window ── */
+[data-theme="sololeveling"] #gateBanner {
+  background: rgba(10, 11, 26, 0.85);
+  border: none;
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+  backdrop-filter: blur(6px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+    0 0 30px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+[data-theme="sololeveling"] .gateDesc { font-family: var(--font-mono); }
+[data-theme="sololeveling"] .gateHold {
+  border-color: var(--accent-2);
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+[data-theme="sololeveling"] .gateHoldFill { background: color-mix(in srgb, var(--accent-2) 45%, transparent); }
+[data-theme="sololeveling"] .gateHoldLabel {
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+[data-theme="sololeveling"] .gateDenyBtn {
+  color: var(--rec);
+  background: var(--surface-2);
+  border-color: color-mix(in srgb, var(--rec) 45%, transparent);
+}
+
+/* ── Avatar pane: System-window frame around the TalkingHead canvas.
+   Shares the clip-path/backdrop-filter/sweep treatment added to the
+   .card/#historyRail/#sessionRail selector groups above; this block covers
+   the pieces unique to #avatarPane (toggle chevron, fallback label). ── */
+[data-theme="sololeveling"] #avatarToggle {
+  clip-path: polygon(18% 0, 82% 0, 100% 18%, 100% 82%, 82% 100%, 18% 100%, 0 82%, 0 18%);
+  background: var(--surface-2);
+  border-color: var(--accent-2);
+  color: var(--accent);
+}
+[data-theme="sololeveling"] #avatarFallback {
+  font-family: var(--font-mono);
+  color: var(--accent-2);
+}
+[data-theme="sololeveling"] #avatarFallback::before { content: "【 "; }
+[data-theme="sololeveling"] #avatarFallback::after { content: " 】"; }
+
+/* ── History rail / session rail ── */
+[data-theme="sololeveling"] .historyTime,
+[data-theme="sololeveling"] .sessionKey { color: var(--accent-2); font-family: var(--font-mono); }
+[data-theme="sololeveling"] .historyEntry { border-bottom-color: var(--border); }
+[data-theme="sololeveling"] .sessionRow { border-bottom-color: var(--border); }
+
+[data-theme="sololeveling"] #log {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+@media (min-width: 1024px) {
+  [data-theme="sololeveling"] #assistantText .body,
+  [data-theme="sololeveling"] #transcript .body {
+    font-family: var(--font-display);
+    letter-spacing: 0.01em;
+  }
+  [data-theme="sololeveling"] #transcript .body { font-weight: 700; }
+  [data-theme="sololeveling"] #assistantText .body { font-weight: 900; }
+  [data-theme="sololeveling"] #historyRail,
+  [data-theme="sololeveling"] #sessionRail {
+    border-color: var(--border);
+  }
+}
+
+@keyframes sololevelingSweep {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="sololeveling"] .card::before,
+  [data-theme="sololeveling"] #historyRail::before,
+  [data-theme="sololeveling"] #sessionRail::before,
+  [data-theme="sololeveling"] #avatarPane::before { animation: none !important; }
+  [data-theme="sololeveling"] body:has(#ptt.recording) .panelFrame { animation: none !important; }
+  [data-theme="sololeveling"] #fxBack { animation: none !important; }
+  [data-theme="sololeveling"] #pttDeco { animation: none !important; }
+  [data-theme="sololeveling"] #pttDeco::before { animation: none !important; }
+  [data-theme="sololeveling"] .statCol::before,
+  [data-theme="sololeveling"] .statCol::after { animation: none !important; }
+  [data-theme="sololeveling"] #questCard[data-cockpit-status="running"] .questStatusLine,
+  [data-theme="sololeveling"] #questCard[data-cockpit-status="sent"] .questStatusLine { animation: none !important; }
+}
+
+/* ══ Mood system (see THEME-SPEC.md "Mood system") ══════════════════════
+   Compound [data-theme="sololeveling"][data-mood="…"] selectors only ever
+   retune existing chrome (glow color, brightness, animation-duration) —
+   no new keyframes, no layout changes. Every animation-duration override
+   below targets an element the reduced-motion block above already fully
+   silences via `animation: none !important`, so reduced-motion still wins
+   with zero extra rules needed here. */
+
+/* ── thinking: cooler, dimmer mist; deep-blue frame glow; slower pulses ── */
+[data-theme="sololeveling"][data-mood="thinking"] #fxBack {
+  filter: url(#vaMist) brightness(calc(0.68 + var(--level, 0) * 0.2)) saturate(0.7) hue-rotate(-18deg);
+  animation-duration: 74s;
+}
+[data-theme="sololeveling"][data-mood="thinking"] .panelFrame {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, #3b82f6 55%, transparent),
+    inset 0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+    inset 0 0 0 5px color-mix(in srgb, #1e3a8a 40%, transparent);
+}
+[data-theme="sololeveling"][data-mood="thinking"] .panelFrame::before,
+[data-theme="sololeveling"][data-mood="thinking"] .panelFrame::after {
+  background: #3b82f6;
+  box-shadow: 0 0 8px color-mix(in srgb, #3b82f6 70%, transparent);
+}
+[data-theme="sololeveling"][data-mood="thinking"] #pttDeco { animation-duration: 28s; }
+[data-theme="sololeveling"][data-mood="thinking"] #pttDeco::before {
+  animation-duration: 4.4s;
+  background: radial-gradient(circle, #3b82f6, transparent 70%);
+  box-shadow: 0 0 16px color-mix(in srgb, #3b82f6 65%, transparent);
+}
+
+/* ── excited: brighter mist, faster sigil spin/core breathe/panel sweep ── */
+[data-theme="sololeveling"][data-mood="excited"] #fxBack {
+  filter: url(#vaMist) brightness(calc(1.18 + var(--level, 0) * 0.4)) saturate(1.25);
+  animation-duration: 30s;
+}
+[data-theme="sololeveling"][data-mood="excited"] #pttDeco { animation-duration: 7s; }
+[data-theme="sololeveling"][data-mood="excited"] #pttDeco::before { animation-duration: 1.3s; }
+[data-theme="sololeveling"][data-mood="excited"] .card::before,
+[data-theme="sololeveling"][data-mood="excited"] #historyRail::before,
+[data-theme="sololeveling"][data-mood="excited"] #sessionRail::before {
+  animation-duration: 1.4s;
+}
+[data-theme="sololeveling"][data-mood="excited"] .statCol::before,
+[data-theme="sololeveling"][data-mood="excited"] .statCol::after {
+  animation-duration: 1.6s;
+}
+
+/* ── concerned: violet→amber warm shift on frames and assistant text ── */
+[data-theme="sololeveling"][data-mood="concerned"] #fxBack {
+  filter: url(#vaMist) brightness(calc(0.95 + var(--level, 0) * 0.3)) hue-rotate(28deg) saturate(1.1);
+}
+[data-theme="sololeveling"][data-mood="concerned"] .panelFrame {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, #ffb020 55%, transparent),
+    inset 0 0 0 4px color-mix(in srgb, var(--bg) 55%, transparent),
+    inset 0 0 0 5px color-mix(in srgb, #7a4a06 40%, transparent);
+}
+[data-theme="sololeveling"][data-mood="concerned"] .panelFrame::before,
+[data-theme="sololeveling"][data-mood="concerned"] .panelFrame::after {
+  background: #ffb020;
+  box-shadow: 0 0 8px color-mix(in srgb, #ffb020 70%, transparent);
+}
+[data-theme="sololeveling"][data-mood="concerned"] #assistantText .body {
+  color: #ffb020;
+  text-shadow: 0 0 18px color-mix(in srgb, #ffb020 35%, transparent);
+}
+
+/* ── playful: accent-2 (violet) leads assistant text + sigil faces ── */
+[data-theme="sololeveling"][data-mood="playful"] #assistantText .body {
+  color: var(--accent-2);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent-2) 40%, transparent);
+}
+[data-theme="sololeveling"][data-mood="playful"] #pttDeco i {
+  background: linear-gradient(160deg, color-mix(in srgb, var(--accent-2) 70%, transparent), color-mix(in srgb, var(--accent) 45%, transparent));
+}
+[data-theme="sololeveling"][data-mood="playful"] .statCol::before,
+[data-theme="sololeveling"][data-mood="playful"] .statCol::after {
+  animation-duration: 2s;
+}

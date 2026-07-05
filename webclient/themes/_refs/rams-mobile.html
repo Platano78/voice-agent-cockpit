@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&amp;family=Inter:wght@400;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .recessed-panel {
+            box-shadow: inset 1px 1px 3px rgba(0,0,0,0.4), inset -1px -1px 3px rgba(255,255,255,0.05);
+        }
+        .protruding-button {
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.5), -1px -1px 2px rgba(255,255,255,0.1);
+        }
+        .protruding-button:active {
+            box-shadow: inset 1px 1px 2px rgba(0,0,0,0.6);
+            transform: translateY(1px);
+        }
+        .knob-shadow {
+            box-shadow: 4px 4px 10px rgba(0,0,0,0.6), -2px -2px 6px rgba(255,255,255,0.05);
+        }
+        .scanline-overlay {
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.02), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.02));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+        }
+        .led-glow-orange {
+            box-shadow: 0 0 8px #ea6b1e, 0 0 12px rgba(234, 107, 30, 0.4);
+        }
+    </style>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "primary": "#dcdcdc",
+                    "surface-container-low": "#1b1c1c",
+                    "on-primary-fixed": "#1a1c1c",
+                    "surface-container-lowest": "#0e0e0e",
+                    "tertiary-container": "#c3c299",
+                    "surface-container": "#1f2020",
+                    "on-secondary-fixed": "#351000",
+                    "on-tertiary": "#323214",
+                    "tertiary": "#e0deb3",
+                    "on-tertiary-fixed": "#1d1d03",
+                    "outline-variant": "#444748",
+                    "on-tertiary-container": "#50502f",
+                    "surface-container-highest": "#353535",
+                    "on-error-container": "#ffdad6",
+                    "tertiary-fixed-dim": "#cac99f",
+                    "on-secondary-fixed-variant": "#7a3000",
+                    "on-background": "#e4e2e1",
+                    "tertiary-fixed": "#e6e5b9",
+                    "primary-fixed": "#e3e2e2",
+                    "on-surface-variant": "#c4c7c7",
+                    "inverse-surface": "#e4e2e1",
+                    "surface": "#131313",
+                    "secondary": "#ffb693",
+                    "primary-fixed-dim": "#c6c6c6",
+                    "on-primary-container": "#4d4e4f",
+                    "surface-bright": "#393939",
+                    "secondary-container": "#ea6b1e",
+                    "surface-dim": "#131313",
+                    "outline": "#8e9192",
+                    "secondary-fixed": "#ffdbcc",
+                    "surface-tint": "#c6c6c6",
+                    "surface-container-high": "#2a2a2a",
+                    "error": "#ffb4ab",
+                    "surface-variant": "#353535",
+                    "primary-container": "#c0c0c0",
+                    "on-primary-fixed-variant": "#464747",
+                    "on-secondary": "#562000",
+                    "secondary-fixed-dim": "#ffb693",
+                    "on-secondary-container": "#4b1b00",
+                    "on-surface": "#e4e2e1",
+                    "background": "#131313",
+                    "on-error": "#690005",
+                    "inverse-primary": "#5d5e5f",
+                    "on-primary": "#2f3131",
+                    "inverse-on-surface": "#303030",
+                    "on-tertiary-fixed-variant": "#484828",
+                    "error-container": "#93000a"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+            },
+            "spacing": {
+                    "unit": "8px",
+                    "panel-padding": "40px",
+                    "stack-tight": "4px",
+                    "component-gap": "24px"
+            },
+            "fontFamily": {
+                    "display-lg": ["Space Mono"],
+                    "technical-sm": ["Space Mono"],
+                    "label-caps": ["Inter"],
+                    "display-md": ["Space Mono"],
+                    "body-md": ["Inter"]
+            },
+            "fontSize": {
+                    "display-lg": ["48px", {"lineHeight": "1.2", "letterSpacing": "2px", "fontWeight": "700"}],
+                    "technical-sm": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                    "label-caps": ["12px", {"lineHeight": "16px", "letterSpacing": "0.1em", "fontWeight": "700"}],
+                    "display-md": ["32px", {"lineHeight": "1.2", "letterSpacing": "1px", "fontWeight": "700"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-surface text-on-surface font-body-md overflow-x-hidden selection:bg-secondary selection:text-on-secondary">
+<!-- Top App Bar -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-panel-padding h-16 border-b border-outline-variant bg-gradient-to-br from-surface-bright to-surface-dim shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-primary hover:opacity-80 transition-opacity cursor-pointer active:translate-y-px duration-75" data-icon="settings">settings</span>
+<h1 class="font-display-md text-display-md text-primary tracking-widest">HI-FI VOICE PRO</h1>
+</div>
+<span class="material-symbols-outlined text-primary hover:opacity-80 transition-opacity cursor-pointer active:translate-y-px duration-75" data-icon="account_circle">account_circle</span>
+</header>
+<main class="pt-24 pb-32 px-6 md:px-panel-padding max-w-5xl mx-auto space-y-8">
+<!-- Status Display Panel -->
+<section class="grid grid-cols-1 md:grid-cols-12 gap-8 items-stretch">
+<div class="md:col-span-8 bg-surface-container-high p-6 rounded-lg border border-outline-variant recessed-panel relative overflow-hidden">
+<div class="scanline-overlay absolute inset-0 z-10"></div>
+<div class="flex justify-between items-start mb-4">
+<div class="space-y-1">
+<p class="font-label-caps text-label-caps text-outline uppercase">Signal Processor</p>
+<h2 class="font-display-md text-display-md text-secondary">ACTIVE_STREAM_01</h2>
+</div>
+<div class="flex items-center gap-4">
+<div class="text-right">
+<p class="font-label-caps text-label-caps text-outline">LATENCY</p>
+<p class="font-technical-sm text-technical-sm text-secondary">12.4ms</p>
+</div>
+<div class="w-3 h-3 rounded-full bg-secondary-container led-glow-orange"></div>
+</div>
+</div>
+<div class="h-32 bg-surface-container-lowest rounded border border-outline/20 p-2 flex items-end gap-1 overflow-hidden">
+<!-- Audio Waveform Visualization -->
+<div class="flex-1 flex items-end justify-center gap-1 h-full">
+<div class="w-2 bg-secondary opacity-40 animate-[pulse_1s_infinite]" style="height: 40%"></div>
+<div class="w-2 bg-secondary opacity-60 animate-[pulse_1.2s_infinite]" style="height: 70%"></div>
+<div class="w-2 bg-secondary opacity-80 animate-[pulse_0.8s_infinite]" style="height: 50%"></div>
+<div class="w-2 bg-secondary-container animate-[pulse_1.5s_infinite]" style="height: 90%"></div>
+<div class="w-2 bg-secondary opacity-80 animate-[pulse_0.9s_infinite]" style="height: 60%"></div>
+<div class="w-2 bg-secondary opacity-60 animate-[pulse_1.1s_infinite]" style="height: 45%"></div>
+<div class="w-2 bg-secondary opacity-40 animate-[pulse_1.3s_infinite]" style="height: 30%"></div>
+<div class="hidden sm:block w-2 bg-secondary opacity-20" style="height: 20%"></div>
+<div class="hidden sm:block w-2 bg-secondary opacity-40" style="height: 50%"></div>
+<div class="hidden sm:block w-2 bg-secondary-container" style="height: 80%"></div>
+</div>
+</div>
+<div class="mt-4 flex justify-between font-technical-sm text-technical-sm text-outline">
+<span>00:42:15</span>
+<span class="text-secondary">RECORDING...</span>
+<span>1024 KBPS</span>
+</div>
+</div>
+<!-- VU Meter Module -->
+<div class="md:col-span-4 bg-surface-container-high p-6 rounded-lg border border-outline-variant recessed-panel flex flex-col justify-center items-center text-center">
+<p class="font-label-caps text-label-caps text-outline mb-6">OUTPUT GAIN</p>
+<div class="relative w-48 h-24 border-b border-outline/30 overflow-hidden">
+<!-- Meter Scale -->
+<div class="absolute inset-0 flex items-end justify-between px-2">
+<span class="text-[10px] text-outline">-20</span>
+<span class="text-[10px] text-outline">-10</span>
+<span class="text-[10px] text-outline">0</span>
+<span class="text-[10px] text-secondary">PEAK</span>
+</div>
+<!-- Needle -->
+<div class="absolute bottom-0 left-1/2 w-1 h-32 bg-secondary-container origin-bottom transition-transform duration-150 ease-out" id="vu-needle" style="transform: translateX(-50%) rotate(-45deg);"></div>
+<div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-4 h-4 bg-outline rounded-full"></div>
+</div>
+<div class="mt-8 flex gap-4">
+<div class="flex flex-col items-center">
+<div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary-container to-on-primary-container border border-outline knob-shadow flex items-center justify-center cursor-pointer active:scale-95 transition-transform">
+<div class="w-1 h-4 bg-secondary-container -mt-4"></div>
+</div>
+<span class="mt-2 font-label-caps text-label-caps text-outline">LVL</span>
+</div>
+<div class="flex flex-col items-center">
+<div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary-container to-on-primary-container border border-outline knob-shadow flex items-center justify-center cursor-pointer active:scale-95 transition-transform">
+<div class="w-1 h-4 bg-secondary-container -mt-4 rotate-45"></div>
+</div>
+<span class="mt-2 font-label-caps text-label-caps text-outline">FRQ</span>
+</div>
+</div>
+</div>
+</section>
+<!-- Main Interaction Deck -->
+<section class="grid grid-cols-1 md:grid-cols-2 gap-8">
+<!-- Voice Deck -->
+<div class="bg-surface-variant p-8 rounded-xl border border-outline-variant shadow-lg flex flex-col items-center justify-center min-h-[400px]">
+<h3 class="font-label-caps text-label-caps text-outline mb-12">MAIN COMMAND DECK</h3>
+<div class="relative">
+<div class="absolute -inset-8 rounded-full border border-secondary/10 animate-ping"></div>
+<button class="w-48 h-48 rounded-full bg-secondary-container border-[6px] border-primary-container protruding-button flex flex-col items-center justify-center group relative z-20">
+<span class="material-symbols-outlined text-surface text-6xl" data-icon="mic">mic</span>
+<span class="mt-2 font-display-md text-surface text-xl">PUSH</span>
+</button>
+</div>
+<div class="mt-16 grid grid-cols-3 gap-8 w-full">
+<div class="flex flex-col items-center gap-2">
+<div class="w-12 h-16 bg-primary-container border-x border-b border-on-surface/20 rounded-b-sm flex flex-col items-center p-1 cursor-pointer">
+<div class="w-full h-8 bg-surface-dim border border-outline-variant rounded-sm flex items-center justify-center">
+<div class="w-2 h-2 rounded-full bg-secondary led-glow-orange"></div>
+</div>
+<span class="material-symbols-outlined text-on-surface text-lg mt-1" data-icon="power_settings_new">power_settings_new</span>
+</div>
+<span class="font-label-caps text-label-caps text-outline">POWER</span>
+</div>
+<div class="flex flex-col items-center gap-2">
+<div class="w-12 h-16 bg-primary-container border-x border-b border-on-surface/20 rounded-b-sm flex flex-col items-center p-1 cursor-pointer">
+<div class="w-full h-8 bg-surface-dim border border-outline-variant rounded-sm flex items-center justify-center">
+<div class="w-2 h-2 rounded-full bg-outline/20"></div>
+</div>
+<span class="material-symbols-outlined text-on-surface text-lg mt-1" data-icon="graphic_eq">graphic_eq</span>
+</div>
+<span class="font-label-caps text-label-caps text-outline">LIMIT</span>
+</div>
+<div class="flex flex-col items-center gap-2">
+<div class="w-12 h-16 bg-primary-container border-x border-b border-on-surface/20 rounded-b-sm flex flex-col items-center p-1 cursor-pointer">
+<div class="w-full h-8 bg-surface-dim border border-outline-variant rounded-sm flex items-center justify-center">
+<div class="w-2 h-2 rounded-full bg-secondary led-glow-orange"></div>
+</div>
+<span class="material-symbols-outlined text-on-surface text-lg mt-1" data-icon="filter_vintage">filter_vintage</span>
+</div>
+<span class="font-label-caps text-label-caps text-outline">TUBE</span>
+</div>
+</div>
+</div>
+<!-- Transcription Module -->
+<div class="bg-surface-container-high p-8 rounded-xl border border-outline-variant recessed-panel flex flex-col">
+<div class="flex justify-between items-center mb-6">
+<h3 class="font-label-caps text-label-caps text-outline">LIVE_TRANSCRIPTION</h3>
+<div class="px-3 py-1 bg-surface-container-lowest border border-outline-variant rounded-full text-[10px] text-secondary font-technical-sm">
+                        SYST_SYNCED
+                    </div>
+</div>
+<div class="flex-1 space-y-6 overflow-y-auto max-h-[300px] pr-2 custom-scrollbar">
+<div class="border-l-2 border-secondary/30 pl-4 py-1">
+<p class="font-technical-sm text-technical-sm text-outline mb-1">00:42:10</p>
+<p class="text-on-surface leading-relaxed">Initializing high-fidelity voice analysis... Frequency response within optimal parameters. Noise floor detected at -84dB. Dynamic compression active.</p>
+</div>
+<div class="border-l-2 border-secondary pl-4 py-1">
+<p class="font-technical-sm text-technical-sm text-secondary mb-1">00:42:15</p>
+<p class="text-on-surface font-bold leading-relaxed">Capture mode engaged. Processing real-time semantic structures and emotional resonance markers in the vocal chain.</p>
+</div>
+<div class="border-l-2 border-secondary/10 pl-4 py-1">
+<p class="font-technical-sm text-technical-sm text-outline/40 mb-1">00:42:22</p>
+<p class="text-on-surface/40 leading-relaxed italic">Awaiting further input buffer...</p>
+</div>
+</div>
+<div class="mt-8 flex gap-4">
+<button class="flex-1 py-3 bg-primary-container text-on-primary font-label-caps text-label-caps rounded protruding-button hover:opacity-90 active:translate-y-px transition-all">EXPORT_LOG</button>
+<button class="flex-1 py-3 bg-surface-bright text-primary border border-outline-variant font-label-caps text-label-caps rounded protruding-button hover:bg-surface-variant transition-all">CLEAR_CACHE</button>
+</div>
+</div>
+</section>
+<!-- Mechanical Switch Array -->
+<section class="bg-surface-container-low p-6 rounded-lg border border-outline-variant">
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-8">
+<div class="flex flex-col items-center">
+<span class="font-label-caps text-label-caps text-outline mb-4">AUTO_GAIN</span>
+<div class="w-10 h-20 bg-surface-container-lowest border border-outline-variant rounded-full p-1 flex flex-col justify-between">
+<div class="w-8 h-8 rounded-full bg-secondary-container shadow-md"></div>
+<div class="w-8 h-8 rounded-full bg-surface-bright border border-outline-variant"></div>
+</div>
+</div>
+<div class="flex flex-col items-center">
+<span class="font-label-caps text-label-caps text-outline mb-4">GATE_HD</span>
+<div class="w-10 h-20 bg-surface-container-lowest border border-outline-variant rounded-full p-1 flex flex-col justify-between">
+<div class="w-8 h-8 rounded-full bg-surface-bright border border-outline-variant"></div>
+<div class="w-8 h-8 rounded-full bg-secondary-container shadow-md"></div>
+</div>
+</div>
+<div class="flex flex-col items-center">
+<span class="font-label-caps text-label-caps text-outline mb-4">MONO_ST</span>
+<div class="w-10 h-20 bg-surface-container-lowest border border-outline-variant rounded-full p-1 flex flex-col justify-between">
+<div class="w-8 h-8 rounded-full bg-secondary-container shadow-md"></div>
+<div class="w-8 h-8 rounded-full bg-surface-bright border border-outline-variant"></div>
+</div>
+</div>
+<div class="flex flex-col items-center">
+<span class="font-label-caps text-label-caps text-outline mb-4">VIRT_ROOM</span>
+<div class="w-10 h-20 bg-surface-container-lowest border border-outline-variant rounded-full p-1 flex flex-col justify-between">
+<div class="w-8 h-8 rounded-full bg-surface-bright border border-outline-variant"></div>
+<div class="w-8 h-8 rounded-full bg-secondary-container shadow-md"></div>
+</div>
+</div>
+</div>
+</section>
+</main>
+<!-- Bottom Navigation Bar -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center h-20 pb-4 border-t border-outline bg-gradient-to-b from-surface-bright to-surface-dim shadow-[0_-4px_10px_rgba(0,0,0,0.5)]">
+<div class="flex flex-col items-center justify-center text-secondary scale-105 hover:text-primary transition-colors active:scale-95 transition-transform duration-100 cursor-pointer">
+<span class="material-symbols-outlined mb-1" data-icon="settings_voice">settings_voice</span>
+<span class="font-label-caps text-label-caps">DECK</span>
+</div>
+<div class="flex flex-col items-center justify-center text-outline opacity-60 hover:text-primary transition-colors active:scale-95 transition-transform duration-100 cursor-pointer">
+<span class="material-symbols-outlined mb-1" data-icon="radio">radio</span>
+<span class="font-label-caps text-label-caps">TUNER</span>
+</div>
+<div class="flex flex-col items-center justify-center text-outline opacity-60 hover:text-primary transition-colors active:scale-95 transition-transform duration-100 cursor-pointer">
+<span class="material-symbols-outlined mb-1" data-icon="history">history</span>
+<span class="font-label-caps text-label-caps">HISTORY</span>
+</div>
+<div class="flex flex-col items-center justify-center text-outline opacity-60 hover:text-primary transition-colors active:scale-95 transition-transform duration-100 cursor-pointer">
+<span class="material-symbols-outlined mb-1" data-icon="analytics">analytics</span>
+<span class="font-label-caps text-label-caps">SYSTEM</span>
+</div>
+</nav>
+<script>
+        // VU Meter Animation Script
+        const needle = document.getElementById('vu-needle');
+        function updateNeedle() {
+            // Simulate random needle movement
+            const randomRotation = -45 + (Math.random() * 90);
+            needle.style.transform = `translateX(-50%) rotate(${randomRotation}deg)`;
+            
+            // Random interval for more organic movement
+            setTimeout(updateNeedle, 100 + Math.random() * 300);
+        }
+        updateNeedle();
+
+        // Button Click Interactions
+        document.querySelectorAll('.protruding-button').forEach(btn => {
+            btn.addEventListener('mousedown', () => {
+                btn.style.transform = 'translateY(2px)';
+            });
+            btn.addEventListener('mouseup', () => {
+                btn.style.transform = 'translateY(0)';
+            });
+            btn.addEventListener('mouseleave', () => {
+                btn.style.transform = 'translateY(0)';
+            });
+        });
+    </script>
+</body></html>

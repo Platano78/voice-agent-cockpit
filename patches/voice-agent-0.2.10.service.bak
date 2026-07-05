@@ -1,0 +1,16 @@
+[Unit]
+Description=Voice agent speech-to-speech pipeline (ws :8765)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=platano
+Environment=HOME=/home/platano
+WorkingDirectory=/home/platano/speech-to-speech
+ExecStart=/home/platano/speech-to-speech/.venv/bin/speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port 8765 --stt parakeet-tdt --parakeet_tdt_device cpu --tts pocket --pocket_tts_voice jean --pocket_tts_device cpu --llm_backend responses-api --responses_api_base_url http://localhost:8084/v1 --responses_api_api_key dummy --model_name gemma4-12b --responses_api_stream --speculative_reopen_ms=-1 --unanswered_reopen_ms=-1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

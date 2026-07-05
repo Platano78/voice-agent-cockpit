@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>HI-FI VOICE PRO | Editorial Interface</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&amp;family=Inter:wght@400;700&amp;family=Playfair+Display:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "surface-container-highest": "#353535",
+                      "on-tertiary": "#323214",
+                      "primary": "#dcdcdc",
+                      "on-tertiary-fixed-variant": "#484828",
+                      "on-background": "#e4e2e1",
+                      "surface-variant": "#353535",
+                      "surface": "#131313",
+                      "background": "#131313",
+                      "surface-container-low": "#1b1c1c",
+                      "secondary": "#ffb693",
+                      "on-surface-variant": "#c4c7c7",
+                      "on-primary-fixed-variant": "#464747",
+                      "primary-fixed-dim": "#c6c6c6",
+                      "on-tertiary-fixed": "#1d1d03",
+                      "on-surface": "#e4e2e1",
+                      "outline": "#8e9192",
+                      "inverse-primary": "#5d5e5f",
+                      "surface-dim": "#131313",
+                      "on-secondary-fixed": "#351000",
+                      "surface-container-lowest": "#0e0e0e",
+                      "tertiary": "#e0deb3",
+                      "secondary-fixed-dim": "#ffb693",
+                      "primary-fixed": "#e3e2e2",
+                      "surface-container-high": "#2a2a2a",
+                      "on-secondary-fixed-variant": "#7a3000",
+                      "error-container": "#93000a",
+                      "surface-tint": "#c6c6c6",
+                      "on-primary-container": "#4d4e4f",
+                      "tertiary-fixed-dim": "#cac99f",
+                      "surface-container": "#1f2020",
+                      "on-error": "#690005",
+                      "secondary-container": "#ea6b1e",
+                      "on-tertiary-container": "#50502f",
+                      "inverse-surface": "#e4e2e1",
+                      "on-secondary-container": "#4b1b00",
+                      "on-primary": "#2f3131",
+                      "on-primary-fixed": "#1a1c1c",
+                      "tertiary-fixed": "#e6e5b9",
+                      "surface-bright": "#393939",
+                      "error": "#ffb4ab",
+                      "on-error-container": "#ffdad6",
+                      "inverse-on-surface": "#303030",
+                      "tertiary-container": "#c3c299",
+                      "secondary-fixed": "#ffdbcc",
+                      "outline-variant": "#444748",
+                      "on-secondary": "#562000",
+                      "primary-container": "#c0c0c0",
+                      "paper": "#F5F5F0",
+                      "ink": "#1A1A1A"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.125rem",
+                      "lg": "0.25rem",
+                      "xl": "0.5rem",
+                      "full": "0.75rem"
+              },
+              "spacing": {
+                      "unit": "8px",
+                      "panel-padding": "40px",
+                      "component-gap": "24px",
+                      "stack-tight": "4px"
+              },
+              "fontFamily": {
+                      "label-caps": ["Inter"],
+                      "display-lg": ["Playfair Display"],
+                      "technical-sm": ["Space Mono"],
+                      "display-md": ["Playfair Display"],
+                      "body-md": ["Inter"],
+                      "serif-italic": ["Playfair Display"]
+              },
+              "fontSize": {
+                      "label-caps": ["12px", {"lineHeight": "16px", "letterSpacing": "0.15em", "fontWeight": "700"}],
+                      "display-lg": ["64px", {"lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "400"}],
+                      "technical-sm": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                      "display-md": ["32px", {"lineHeight": "1.2", "letterSpacing": "1px", "fontWeight": "700"}],
+                      "body-md": ["18px", {"lineHeight": "28px", "fontWeight": "400"}]
+              }
+            },
+          },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 200, 'GRAD' 0, 'opsz' 24;
+        }
+        body {
+            background-color: #F5F5F0;
+            color: #1A1A1A;
+            -webkit-font-smoothing: antialiased;
+        }
+        .paper-grain {
+            background-image: url("https://www.transparenttextures.com/patterns/natural-paper.png");
+            opacity: 0.15;
+            pointer-events: none;
+        }
+        .voice-ring {
+            transition: stroke-dashoffset 0.1s linear;
+        }
+        .ink-rule {
+            height: 1px;
+            background-color: rgba(26, 26, 26, 0.1);
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="min-h-screen flex flex-col font-body-md overflow-hidden">
+<!-- Paper Texture Overlay -->
+<div class="fixed inset-0 paper-grain z-0"></div>
+<!-- Top Navigation Anchor -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-panel-padding h-16 border-b border-ink/5 bg-paper/80 backdrop-blur-sm">
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-ink" data-icon="settings">settings</span>
+<span class="font-technical-sm text-technical-sm uppercase tracking-[0.2em] text-ink/40">HI-FI VOICE PRO</span>
+</div>
+<div class="flex items-center gap-4">
+<span class="font-label-caps text-label-caps text-ink/60">SESSION 042</span>
+<span class="material-symbols-outlined text-ink" data-icon="account_circle">account_circle</span>
+</div>
+</header>
+<!-- Main Editorial Canvas -->
+<main class="flex-grow flex flex-col items-center justify-center px-10 text-center z-10 max-w-5xl mx-auto py-32">
+<!-- User Input (Italic Serif) -->
+<div class="mb-8 opacity-0 animate-in fade-in slide-in-from-bottom-4 duration-1000 fill-mode-forwards">
+<p class="font-serif-italic italic text-display-md text-ink/40 leading-tight">
+                "What's the forecast for the afternoon in London?"
+            </p>
+</div>
+<!-- Hairline Divider -->
+<div class="w-16 ink-rule mb-12"></div>
+<!-- Assistant Reply (Large Display Serif) -->
+<div class="relative">
+<h1 class="font-display-lg text-display-lg text-ink animate-in fade-in duration-1000 delay-300 fill-mode-forwards">
+                The weather in London is <span class="italic">misty</span>, with a hint of autumn chill. Expect occasional sunbeams breaking through by four.
+            </h1>
+</div>
+<!-- Discreet Status -->
+<div class="mt-20 flex flex-col items-center gap-2">
+<span class="font-label-caps text-[10px] tracking-[0.3em] text-ink/30 uppercase">System Status</span>
+<div class="flex items-center gap-3">
+<span class="font-technical-sm text-technical-sm text-ink/80">READY</span>
+<div class="w-1 h-1 rounded-full bg-ink"></div>
+<span class="font-technical-sm text-technical-sm text-ink/40">IDLE</span>
+</div>
+</div>
+</main>
+<!-- Bottom Interface Controls -->
+<footer class="fixed bottom-0 left-0 w-full z-50 flex flex-col items-center pb-12 pt-6 bg-gradient-to-t from-paper via-paper to-transparent">
+<!-- Action Label -->
+<div class="mb-6">
+<span class="font-label-caps text-label-caps text-ink/50 uppercase tracking-[0.4em]" id="interaction-status">Hold to Talk</span>
+</div>
+<!-- Voice Interaction Button -->
+<div class="relative group cursor-pointer" id="hold-button">
+<!-- Progress/Level Ring -->
+<svg class="absolute -inset-4 w-24 h-24 -rotate-90 transform" viewbox="0 0 100 100">
+<circle class="text-ink/10" cx="50" cy="50" fill="none" r="48" stroke="currentColor" stroke-width="0.5"></circle>
+<circle class="text-ink voice-ring" cx="50" cy="50" fill="none" id="voice-progress" r="48" stroke="currentColor" stroke-dasharray="301.6" stroke-dashoffset="301.6" stroke-width="1"></circle>
+</svg>
+<!-- Minimal Circular Button -->
+<button class="relative w-16 h-16 rounded-full border border-ink/10 bg-paper flex items-center justify-center transition-all duration-300 group-active:scale-90 group-active:bg-ink group-active:text-paper">
+<span class="material-symbols-outlined text-[20px]" data-icon="settings_voice">settings_voice</span>
+</button>
+</div>
+<!-- Shell Navigation (Hidden on small focuses, but logic maintained) -->
+<nav class="mt-12 hidden md:flex items-center gap-12 border-t border-ink/5 pt-8 w-full justify-center">
+<div class="flex flex-col items-center justify-center text-ink scale-105 transition-transform">
+<span class="material-symbols-outlined text-[20px] mb-1" data-icon="settings_voice">settings_voice</span>
+<span class="font-label-caps text-[10px]">DECK</span>
+</div>
+<div class="flex flex-col items-center justify-center text-ink/30 opacity-60 hover:text-ink hover:opacity-100 transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px] mb-1" data-icon="radio">radio</span>
+<span class="font-label-caps text-[10px]">TUNER</span>
+</div>
+<div class="flex flex-col items-center justify-center text-ink/30 opacity-60 hover:text-ink hover:opacity-100 transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px] mb-1" data-icon="history">history</span>
+<span class="font-label-caps text-[10px]">HISTORY</span>
+</div>
+<div class="flex flex-col items-center justify-center text-ink/30 opacity-60 hover:text-ink hover:opacity-100 transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px] mb-1" data-icon="analytics">analytics</span>
+<span class="font-label-caps text-[10px]">SYSTEM</span>
+</div>
+</nav>
+</footer>
+<!-- Bottom Nav for Mobile - Destination Count 4 as per JSON -->
+<div class="md:hidden fixed bottom-0 left-0 w-full z-50 flex justify-around items-center h-20 pb-4 bg-paper/95 backdrop-blur-md border-t border-ink/5">
+<div class="flex flex-col items-center justify-center text-ink scale-105">
+<span class="material-symbols-outlined" data-icon="settings_voice">settings_voice</span>
+<span class="font-label-caps text-[10px] uppercase">DECK</span>
+</div>
+<div class="flex flex-col items-center justify-center text-ink/40 opacity-60">
+<span class="material-symbols-outlined" data-icon="radio">radio</span>
+<span class="font-label-caps text-[10px] uppercase">TUNER</span>
+</div>
+<div class="flex flex-col items-center justify-center text-ink/40 opacity-60">
+<span class="material-symbols-outlined" data-icon="history">history</span>
+<span class="font-label-caps text-[10px] uppercase">HISTORY</span>
+</div>
+<div class="flex flex-col items-center justify-center text-ink/40 opacity-60">
+<span class="material-symbols-outlined" data-icon="analytics">analytics</span>
+<span class="font-label-caps text-[10px] uppercase">SYSTEM</span>
+</div>
+</div>
+<script>
+        const holdButton = document.getElementById('hold-button');
+        const progressRing = document.getElementById('voice-progress');
+        const statusLabel = document.getElementById('interaction-status');
+        let interval;
+        let progress = 0;
+
+        holdButton.addEventListener('mousedown', startListening);
+        holdButton.addEventListener('touchstart', startListening);
+        
+        document.addEventListener('mouseup', stopListening);
+        document.addEventListener('touchend', stopListening);
+
+        function startListening(e) {
+            e.preventDefault();
+            statusLabel.innerText = "LISTENING";
+            statusLabel.classList.add('animate-pulse');
+            
+            progress = 0;
+            interval = setInterval(() => {
+                progress += 2.5;
+                if (progress > 100) progress = 100;
+                const offset = 301.6 - (progress / 100) * 301.6;
+                progressRing.style.strokeDashoffset = offset;
+            }, 50);
+        }
+
+        function stopListening() {
+            if (!interval) return;
+            clearInterval(interval);
+            interval = null;
+            
+            statusLabel.innerText = "PROCESSING";
+            
+            // Artificial delay to mimic processing
+            setTimeout(() => {
+                statusLabel.innerText = "HOLD TO TALK";
+                statusLabel.classList.remove('animate-pulse');
+                progressRing.style.strokeDashoffset = 301.6;
+            }, 1000);
+        }
+
+        // Simulating the "Mist" effect subtly with mouse movement
+        document.addEventListener('mousemove', (e) => {
+            const x = (e.clientX / window.innerWidth - 0.5) * 10;
+            const y = (e.clientY / window.innerHeight - 0.5) * 10;
+            document.querySelector('h1').style.transform = `translate(${x}px, ${y}px)`;
+        });
+    </script>
+</body></html>
