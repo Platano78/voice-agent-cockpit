@@ -2,8 +2,11 @@
 
 A self-hostable local voice-agent cockpit: the Hugging Face
 [`speech-to-speech`](https://github.com/huggingface/speech-to-speech) framework
-paired with a static web cockpit (`webclient/`) that includes a
-[TalkingHead](https://github.com/met4citizen/TalkingHead) 3D avatar, a
+paired with a static web cockpit (`webclient/`) that includes an avatar pane
+with an **avatar selector dropdown** to pick among bundled
+[TalkingHead](https://github.com/met4citizen/TalkingHead) 3D heads (GLB) or a
+2D still-image avatar (mouth lip-synced from the same audio) — the head choice
+is user-owned and persisted, independent of the active theme — a
 brain/persona selector panel, and a settings UI for switching LLM backends
 live over the WebSocket control channel.
 
@@ -63,12 +66,16 @@ bash /path/to/voice-agent-cockpit/patches/apply.sh
 
 # 4. Configure your brain(s)
 cp /path/to/voice-agent-cockpit/brains.json.example /path/to/voice-agent-cockpit/brains.json
-# edit brains.json: base_url / model / api_key(_file) for each backend you want
+# edit brains.json: base_url / model / api_key(_file) for each backend you want.
+# The pipeline locates this file via the BRAINS_JSON env var (default
+# ~/speech-to-speech/brains.json) — export it to point at the file you just
+# created (done in step 5 below), or move the file to that default path.
 
 # 5. Run the pipeline, pointing --responses_api_base_url / --model_name at
 #    your own endpoint (these are the flags patches/apply.sh's target reads
 #    at startup; brains.json lets you add more brains to hot-swap between
 #    afterwards):
+BRAINS_JSON=/path/to/voice-agent-cockpit/brains.json \
 .venv/bin/speech-to-speech \
   --mode websocket --ws_host 0.0.0.0 --ws_port 8765 \
   --stt parakeet-tdt --parakeet_tdt_device cpu \
@@ -107,7 +114,25 @@ Avatar model files (`webclient/avatar/model/*.glb`), vendor binary assets
 those is separate from this project's code. Supply your own avatar GLB into
 `webclient/avatar/model/` (compatible with
 [TalkingHead](https://github.com/met4citizen/TalkingHead)) and your own theme
-reference images if you use the theming tools under `webclient/themes/`.
+reference images if you use the theming tools under `webclient/themes/`. If
+you want the 2D still-image avatar option, also supply a still image at
+`webclient/avatar/refs/<name>.png` (gitignored, same as the GLBs) — it's
+lip-synced by `webclient/avatar/avatar2d.mjs`.
+
+## Optional integrations
+
+The patch pack reads a few env vars for optional local-service integrations.
+All are optional with localhost defaults — ignore them if you don't run those
+services; the core voice agent (LLM brain + STT + TTS) works without any of
+them.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAINS_JSON` | `~/speech-to-speech/brains.json` | path to your brain registry |
+| `HERMES_SHIM_URL` | `http://localhost:8087/v1/chat/completions` | optional Hermes "shim" brain endpoint |
+| `HERMES_SHIM_TOKEN_FILE` | `~/.hermes/shim.env` | optional Hermes shim token file |
+| `HERMES_MCP_URL` | `http://localhost:8088/mcp` | optional Hermes MCP endpoint (cockpit brain) |
+| `QMD_MCP_URL` | `http://localhost:8070/mcp` | optional QMD knowledge endpoint (voice tools) |
 
 ## Attribution
 

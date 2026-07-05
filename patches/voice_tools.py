@@ -8,6 +8,7 @@ per-tool timeout and a short, TTS-friendly plain-text result.
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Optional
 
@@ -27,7 +28,7 @@ _HERMES_RESPOND_TIMEOUT_S = 6.0
 
 _MOODS = ("neutral", "happy", "excited", "thinking", "concerned", "playful", "serious")
 
-_QMD_URL = "http://localhost:8070/mcp"
+_QMD_URL = os.environ.get("QMD_MCP_URL", "http://localhost:8070/mcp")
 
 # Set once by build_pipeline via set_cockpit(); None until the websocket/
 # chat-completions pipeline wires it up.

@@ -7,13 +7,14 @@
 #
 # Since #8 (2026-07-03), the live install is an editable install from
 # github.com/huggingface/speech-to-speech main
-# (/home/platano/speech-to-speech-main, venv at .venv there); $PKG resolves
+# ($INSTALL_DIR (default $HOME/speech-to-speech-main), venv at .venv there); $PKG resolves
 # straight to the repo's src/speech_to_speech, so a pip reinstall of deps
 # does not wipe these edits — only `git checkout` of the repo files would.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PKG="$(/home/platano/speech-to-speech-main/.venv/bin/python3 -c 'import speech_to_speech, os; print(os.path.dirname(speech_to_speech.__file__))')"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/speech-to-speech-main}"
+PKG="$("$INSTALL_DIR/.venv/bin/python3" -c 'import speech_to_speech, os; print(os.path.dirname(speech_to_speech.__file__))')"
 
 if [ -z "$PKG" ] || [ ! -d "$PKG" ]; then
   echo "Could not locate speech_to_speech package directory" >&2

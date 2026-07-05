@@ -771,7 +771,7 @@ def build_pipeline(
             websocket_streamer_ref.control_callback = BrainControl(
                 llm_handler,
                 runtime_config,
-                "/home/platano/speech-to-speech/brains.json",
+                os.environ.get("BRAINS_JSON", os.path.expanduser("~/speech-to-speech/brains.json")),
                 tts_handler=tts_handler,
                 cockpit=cockpit,
             ).handle

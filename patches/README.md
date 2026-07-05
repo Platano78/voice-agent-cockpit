@@ -8,14 +8,14 @@ main into a fresh venv, pinned at commit `1e63f7e9343e491809d0d60e64f7ea551dbe84
 `chat-completions` LLM backend (`speech_to_speech/LLM/chat_completions_language_model.py::ChatCompletionsApiModelHandler`,
 subclass of the new `LLM/base_openai_compatible_language_model.py::BaseOpenAICompatibleHandler`
 shared by both OpenAI-style handlers) instead of `responses-api`. The old
-0.2.10 install at `/home/platano/speech-to-speech/.venv` is untouched and
+0.2.10 install at `$HOME/speech-to-speech/.venv` is untouched and
 kept as an instant rollback (see below).
 
 ## Install
 
-- Repo: `/home/platano/speech-to-speech-main` (editable install, `.venv` there,
-  python3.10, CPU-only torch/torchaudio 2.11.0 — no CUDA on this box outside
-  the external :8084 model).
+- Repo: `$INSTALL_DIR` (default `$HOME/speech-to-speech-main`) — editable install,
+  `.venv` there, python3.10, CPU-only torch/torchaudio 2.11.0 — no CUDA on this
+  box outside the external :8084 model.
 - `faster-qwen3-tts[ggml]` is a base (non-Darwin) dependency and its
   `qwentts-cpp-python` PyPI wheel is CUDA-only; the CPU wheel had to be
   fetched by hand from
@@ -35,13 +35,13 @@ kept as an instant rollback (see below).
   `BaseOpenAICompatibleHandler`, shared by both OpenAI-style handlers) live,
   updating the persona (`runtime_config.session.instructions`), and resetting
   chat history. Loads brain definitions from
-  `/home/platano/speech-to-speech/brains.json`. Ported for #8: `_extra_body`
+  `$HOME/speech-to-speech/brains.json`. Ported for #8: `_extra_body`
   is now recomputed via `BaseOpenAICompatibleHandler._build_extra_body(base_url,
   True, None)` (mirrors the base class's own `setup()` rule instead of
   reimplementing it) and a brain's API key can come from a literal `api_key`
   or be read lazily from `api_key_file` (env-style `VAR=value` lines) +
   `api_key_var` — used for the Hermes shim's bearer token
-  (`/home/platano/.hermes/shim.env`, `HERMES_SHIM_TOKEN`). The token is never
+  (`~/.hermes/shim.env`, `HERMES_SHIM_TOKEN`). The token is never
   logged; `_resolve_model`'s `GET {base_url}/models` sends it as
   `Authorization: Bearer <key>` when present.
 
@@ -104,10 +104,10 @@ kept as an instant rollback (see below).
 
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
-- `/home/platano/speech-to-speech/brains.json` — brain registry (label,
+- `$HOME/speech-to-speech/brains.json` — brain registry (label,
   base_url, model, availability, notes, optional `api_key`/`api_key_file`+
   `api_key_var`). `hermes` flipped to `available: true` for #8.
-- `/home/platano/speech-to-speech/webclient/index.html` — settings panel UI
+- `<cockpit-repo>/webclient/index.html` — settings panel UI
   (gear button, brain radio list, persona textarea, reset-chat button). No
   protocol change was needed for #8 — the ws control-message shape is
   identical on both backends.
@@ -115,13 +115,13 @@ kept as an instant rollback (see below).
 ## Re-applying
 
 ```bash
-bash /home/platano/speech-to-speech/patches/apply.sh
+bash <cockpit-repo>/patches/apply.sh
 sudo systemctl restart voice-agent
 ```
 
 `apply.sh` locates the current `speech_to_speech` package directory via the
 active venv's Python (`import speech_to_speech; ... __file__`) — since
-`/home/platano/speech-to-speech-main` is an editable install, this resolves
+`$INSTALL_DIR` is an editable install, this resolves
 straight to the repo's `src/speech_to_speech`, so a `pip install` of new deps
 never wipes these edits (only a `git checkout` of those three files would).
 Safe to re-run any number of times.
@@ -129,14 +129,14 @@ Safe to re-run any number of times.
 ## Rollback (0.2.10 / responses-api)
 
 The pre-#8 systemd unit is saved at
-`/home/platano/speech-to-speech/patches/voice-agent-0.2.10.service.bak`
-(`ExecStart` uses `/home/platano/speech-to-speech/.venv` and
+`<cockpit-repo>/patches/voice-agent-0.2.10.service.bak`
+(`ExecStart` uses `$HOME/speech-to-speech/.venv` and
 `--llm_backend responses-api`, unchanged from before #8). To roll back:
 
 ```bash
-ssh ai-utility "sudo cp /home/platano/speech-to-speech/patches/voice-agent-0.2.10.service.bak /etc/systemd/system/voice-agent.service && sudo systemctl daemon-reload && sudo systemctl restart voice-agent"
+sudo cp <cockpit-repo>/patches/voice-agent-0.2.10.service.bak /etc/systemd/system/voice-agent.service && sudo systemctl daemon-reload && sudo systemctl restart voice-agent
 ```
 
-The old venv (`/home/platano/speech-to-speech/.venv`) was never touched by
-the #8 work — `/home/platano/speech-to-speech/.venv/bin/speech-to-speech
+The old venv (`$HOME/speech-to-speech/.venv`) was never touched by
+the #8 work — `$HOME/speech-to-speech/.venv/bin/speech-to-speech
 --help` still runs — so this restores the exact pre-#8 pipeline.

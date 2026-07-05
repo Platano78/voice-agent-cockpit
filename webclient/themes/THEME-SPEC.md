@@ -1,7 +1,7 @@
 # Voice Client Theme Spec
 
 Written for an LLM (or a human) tasked with building the user a **custom theme**
-for the voice-agent web client (`/home/platano/speech-to-speech/webclient/index.html`).
+for the voice-agent web client (`webclient/index.html`).
 
 ## The one rule that matters
 

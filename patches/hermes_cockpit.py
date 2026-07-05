@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from queue import Queue
@@ -24,12 +25,12 @@ from speech_to_speech.pipeline.events import PipelineEvent
 
 logger = logging.getLogger(__name__)
 
-_MCP_URL = "http://localhost:8088/mcp"
+_MCP_URL = os.environ.get("HERMES_MCP_URL", "http://localhost:8088/mcp")
 _MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 _MCP_TIMEOUT_S = 5.0
 
-_SHIM_URL = "http://localhost:8087/v1/chat/completions"
-_SHIM_TOKEN_FILE = "/home/platano/.hermes/shim.env"
+_SHIM_URL = os.environ.get("HERMES_SHIM_URL", "http://localhost:8087/v1/chat/completions")
+_SHIM_TOKEN_FILE = os.environ.get("HERMES_SHIM_TOKEN_FILE", os.path.expanduser("~/.hermes/shim.env"))
 _SHIM_TOKEN_VAR = "HERMES_SHIM_TOKEN"
 _SHIM_MODEL = "hermes-codex"
 _SHIM_TIMEOUT_S = 900.0
