@@ -26,7 +26,7 @@ third-party works. Their own licenses govern their respective code.
 4. Vendored libraries (webclient/avatar/vendor/)
    - three.js (MIT) — 3D rendering.
    - met4citizen/TalkingHead modules (MIT) — 3D head render + lip-sync glue,
-     with two small local patches noted inline (meshopt decoder wiring and
+     with small local patches marked LOCAL VENDOR PATCH inline (meshopt decoder wiring and
      the upstream armature-root fallback).
    - HeadAudio by Mika Suominen (MIT, see its LICENSE) — real-time
      audio-driven viseme detection (webclient/avatar/vendor/headaudio/).
