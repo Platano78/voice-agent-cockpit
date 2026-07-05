@@ -45,6 +45,7 @@ export async function initAvatar2D(mountNode, fallbackNode, hooks) {
   let octx = null;
   let ready = false;
   let curOpen = REST_OPEN;
+  let tapNode = null;
 
   function showFallback(message) {
     if (mountNode) mountNode.hidden = true;
@@ -148,7 +149,8 @@ export async function initAvatar2D(mountNode, fallbackNode, hooks) {
 
   async function setupHeadAudio() {
     const audioCtx = hooks.getPlayCtx();
-    await audioCtx.audioWorklet.addModule(HEADWORKLET_URL);
+    try { await audioCtx.audioWorklet.addModule(HEADWORKLET_URL); }
+    catch (e) { /* processor may already be registered from a prior avatar load; new HeadAudio() below is the real gate */ }
     ha = new HeadAudio(audioCtx, {
       processorOptions: { visemeEventsEnabled: true },
       parameterData: { vadGateActiveDb: -40, vadGateInactiveDb: -60 },
@@ -162,7 +164,7 @@ export async function initAvatar2D(mountNode, fallbackNode, hooks) {
     // ADDITION to its existing destination connection (see hooks.setTap
     // caller in index.html) — never itself connected to destination, so it
     // cannot double the audio output.
-    const tapNode = audioCtx.createGain();
+    tapNode = audioCtx.createGain();
     tapNode.gain.value = 1;
     tapNode.connect(ha);
     hooks.setTap(tapNode);
@@ -196,8 +198,25 @@ export async function initAvatar2D(mountNode, fallbackNode, hooks) {
     setOpen,
   };
 
+  // Full teardown so the mount can host the other (3D) module. Called at most
+  // once per controller during a live head swap. Stops the rAF loop + HeadAudio,
+  // removes the visibilitychange listener (SAME fn ref — a leaked one would keep
+  // toggling this dead module's run-state), disconnects the audio graph THIS
+  // module built (NOT the shared playback context), drops the canvas, and
+  // deletes the global it installed.
+  function destroy() {
+    userExpanded = false;
+    stopRunning();
+    document.removeEventListener("visibilitychange", applyRunState);
+    try { ha?.disconnect(); } catch {}
+    try { tapNode?.disconnect(); } catch {}
+    cv?.remove();
+    try { delete window.__avatar2dDebug; } catch {}
+  }
+
   return {
     start() { userExpanded = true; applyRunState(); },
     stop() { userExpanded = false; applyRunState(); },
+    destroy,
   };
 }

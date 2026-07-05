@@ -57,6 +57,7 @@ const BASE_CAMERA_VIEW = "head";
 export async function initAvatar(mountNode, fallbackNode, hooks) {
   let head = null;
   let ha = null;
+  let tapNode = null;
   let userExpanded = true;
   let rebuildAttempts = 0;
   let currentModelUrl = AVATAR_URL;
@@ -118,7 +119,8 @@ export async function initAvatar(mountNode, fallbackNode, hooks) {
 
   async function setupHeadAudio() {
     const audioCtx = hooks.getPlayCtx();
-    await audioCtx.audioWorklet.addModule(HEADWORKLET_URL);
+    try { await audioCtx.audioWorklet.addModule(HEADWORKLET_URL); }
+    catch (e) { /* processor may already be registered from a prior avatar load; new HeadAudio() below is the real gate */ }
     ha = new HeadAudio(audioCtx, {
       processorOptions: { visemeEventsEnabled: true },
       parameterData: { vadGateActiveDb: -40, vadGateInactiveDb: -60 },
@@ -133,7 +135,7 @@ export async function initAvatar(mountNode, fallbackNode, hooks) {
     // ADDITION to its existing destination connection (see hooks.setTap
     // caller in index.html) — never itself connected to destination, so it
     // cannot double the audio output.
-    const tapNode = audioCtx.createGain();
+    tapNode = audioCtx.createGain();
     tapNode.gain.value = 1;
     tapNode.connect(ha);
     hooks.setTap(tapNode);
@@ -226,8 +228,30 @@ export async function initAvatar(mountNode, fallbackNode, hooks) {
     applyAvatarTheme(themeCfg).catch((e) => console.warn("[avatar] theme apply failed:", e.message));
   };
 
+  // Full teardown so the mount can host the other (2D) module. Called at most
+  // once per controller during a live head swap. Stops rendering, removes the
+  // visibilitychange listener (SAME fn ref — a leaked one would keep toggling
+  // this dead module's run-state), bumps themeGen so any in-flight model swap
+  // bails, disconnects the audio graph THIS module built (NOT the shared
+  // playback context), disposes TalkingHead's WebGL, drops its canvas, and
+  // deletes the globals it installed.
+  function destroy() {
+    userExpanded = false;
+    themeGen += 1; // supersede any in-flight applyAvatarTheme so it can't re-run against a dead head
+    document.removeEventListener("visibilitychange", applyRunState);
+    try { head?.stop(); } catch {}
+    try { ha?.disconnect(); } catch {}
+    try { tapNode?.disconnect(); } catch {}
+    const canvasEl = head?.renderer?.domElement;
+    try { head?.dispose(); } catch {}
+    try { canvasEl?.remove(); } catch {}
+    head = null;
+    try { delete window.__avatarDebug; delete window.__avatarMood; delete window.__avatarTheme; } catch {}
+  }
+
   return {
     start() { userExpanded = true; applyRunState(); },
     stop() { userExpanded = false; applyRunState(); },
+    destroy,
   };
 }

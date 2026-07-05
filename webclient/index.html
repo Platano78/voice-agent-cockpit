@@ -809,7 +809,7 @@
     font: 13px/1.4 inherit;
     resize: vertical;
   }
-  #voiceSelect {
+  #voiceSelect, #avatarSelect {
     width: 100%;
     min-height: 44px;
     background: var(--bg);
@@ -1168,6 +1168,8 @@
   </div>
   <div class="label">Theme</div>
   <div id="themeSwatches"></div>
+  <div class="label">Avatar</div>
+  <select id="avatarSelect"></select>
   <div id="brainStatus">—</div>
   <div class="label">Brain</div>
   <div id="brainList"></div>
@@ -1308,6 +1310,7 @@ const els = {
   personaInput: document.getElementById("personaInput"),
   voiceLabel: document.getElementById("voiceLabel"),
   voiceSelect: document.getElementById("voiceSelect"),
+  avatarSelect: document.getElementById("avatarSelect"),
   applyPersonaBtn: document.getElementById("applyPersonaBtn"),
   resetChatBtn: document.getElementById("resetChatBtn"),
   themeSwatches: document.getElementById("themeSwatches"),
@@ -1402,7 +1405,7 @@ function setTheme(id) {
   document.documentElement.setAttribute("data-theme", id);
   try { localStorage.setItem("va-theme", id); } catch {}
   renderThemeSwatches();
-  window.__avatarTheme?.(getThemeAvatarConfig(id));
+  applyAvatarLook(id);
 }
 
 function renderThemeSwatches() {
@@ -2245,28 +2248,100 @@ window.addEventListener("keyup", (e) => {
 // imported on desktop AND when the stored state is "on" — collapsing before
 // it has ever loaded means zero avatar bytes are fetched at all.
 const AVATAR_STORAGE_KEY = "va-avatar";
-let avatarController = null; // { start, stop } once avatar.mjs has loaded
+let avatarController = null; // { start, stop, destroy } once a head module has loaded
+let currentAvatarKind = null; // "3d" | "2d" — which module is currently mounted
 function avatarWanted() {
   try { return localStorage.getItem(AVATAR_STORAGE_KEY) !== "off"; } catch { return true; }
 }
 function isDesktopViewport() { return window.matchMedia("(min-width: 1024px)").matches; }
 
+// Head selection is USER-owned and persisted under its OWN key, fully
+// decoupled from the theme (theme = colors/lighting/mood only). va-avatar-model
+// is SEPARATE from va-avatar (pane expand/collapse). Two ready 3D GLB heads +
+// the 2D Monarch still.
+const AVATAR_REGISTRY = [
+  { id: "brunette",  name: "Brunette (3D)",  kind: "3d", model: "./avatar/model/brunette-t.glb" },
+  { id: "avatarsdk", name: "AvatarSDK (3D)", kind: "3d", model: "./avatar/model/avatarsdk.glb" },
+  { id: "monarch",   name: "Monarch (2D)",   kind: "2d" },
+];
+const DEFAULT_AVATAR_ID = "brunette";
+const AVATAR_MODEL_KEY = "va-avatar-model"; // SEPARATE from "va-avatar" (pane expand/collapse)
+function selectedAvatarId() {
+  let id = null; try { id = localStorage.getItem(AVATAR_MODEL_KEY); } catch {}
+  return AVATAR_REGISTRY.some(e => e.id === id) ? id : DEFAULT_AVATAR_ID;
+}
+function selectedAvatarEntry() { return AVATAR_REGISTRY.find(e => e.id === selectedAvatarId()); }
+function currentAvatarModel() { const e = selectedAvatarEntry(); return e && e.kind === "3d" ? e.model : undefined; }
+
+// Theme-driven look apply that ALWAYS injects the selected head model, so a
+// theme change preserves the user's chosen head (avatar.mjs's applyAvatarTheme
+// resets to brunette when cfg carries no `model`). For 2D, __avatarTheme
+// doesn't exist → the ?. no-ops → Monarch is unaffected by theme.
+function applyAvatarLook(themeId) {
+  const cfg = getThemeAvatarConfig(themeId) || {};
+  window.__avatarTheme?.({ ...cfg, model: currentAvatarModel() });
+}
+
 async function loadAvatarModule() {
   if (avatarController) return;
+  const entry = selectedAvatarEntry();
   try {
-    const mod = await import("./avatar/avatar.mjs");
-    avatarController = await mod.initAvatar(els.avatarMount, els.avatarFallback, {
-      getPlayCtx: ensurePlayCtx,
-      setTap: (node) => { avatarAudioTapNode = node; },
-    });
-    // Avatar loads lazily, after theme boot — apply whatever theme is
-    // already active so it doesn't appear in the base look on first paint.
-    window.__avatarTheme?.(getThemeAvatarConfig(document.documentElement.getAttribute("data-theme")));
+    if (entry.kind === "2d") {
+      const mod = await import("./avatar/avatar2d.mjs");
+      avatarController = await mod.initAvatar2D(els.avatarMount, els.avatarFallback, {
+        getPlayCtx: ensurePlayCtx,
+        setTap: (node) => { avatarAudioTapNode = node; },
+      });
+      currentAvatarKind = "2d";
+    } else {
+      const mod = await import("./avatar/avatar.mjs");
+      avatarController = await mod.initAvatar(els.avatarMount, els.avatarFallback, {
+        getPlayCtx: ensurePlayCtx,
+        setTap: (node) => { avatarAudioTapNode = node; },
+      });
+      currentAvatarKind = "3d";
+      // Avatar loads lazily, after theme boot — apply whatever theme is already
+      // active (carrying the selected 3D model) so it doesn't appear in the
+      // base look on first paint.
+      applyAvatarLook(document.documentElement.getAttribute("data-theme"));
+    }
   } catch (e) {
     log("avatar module failed to load: " + e.message);
     els.avatarFallback.textContent = "Avatar unavailable";
     els.avatarFallback.hidden = false;
+    return;
   }
+  // If the user changed the head selection while this module was loading, the
+  // in-flight switchAvatar() bailed (controller wasn't set yet) and only
+  // persisted the new id — so the mounted head is now stale. Reconcile to the
+  // latest selection. Terminates: each pass makes the mounted head match the
+  // latest id; once matched the check is false.
+  if (avatarController && selectedAvatarId() !== entry.id) {
+    switchAvatar(selectedAvatarId());
+  }
+}
+
+// Live head swap — no page reload (conversation history is in-memory). Persists
+// the choice; if the module isn't loaded yet (collapsed / pre-desktop), boot
+// will read the stored id. Same kind = no teardown (3D→3D live model swap;
+// 2D→2D is a no-op, only one 2D head). Kind change = destroy() the current
+// module and load the other into the same mount.
+async function switchAvatar(id) {
+  if (!AVATAR_REGISTRY.some(e => e.id === id)) return;
+  try { localStorage.setItem(AVATAR_MODEL_KEY, id); } catch {}
+  if (!avatarController) return; // not loaded yet — boot will read the stored id
+  const entry = AVATAR_REGISTRY.find(e => e.id === id);
+  if (entry.kind === currentAvatarKind) {
+    if (entry.kind === "3d") applyAvatarLook(document.documentElement.getAttribute("data-theme"));
+    return;
+  }
+  try { avatarController.destroy?.(); } catch (e) { log("avatar destroy failed: " + e.message); }
+  avatarController = null; currentAvatarKind = null;
+  els.avatarMount.replaceChildren();          // belt-and-braces: clear any leftover canvas
+  els.avatarMount.hidden = false;             // a prior fallback may have hidden it
+  els.avatarFallback.hidden = true;
+  await loadAvatarModule();
+  syncAvatarRunState();
 }
 
 // Re-reads avatarWanted() rather than trusting the value captured when the
@@ -2296,6 +2371,21 @@ if (isDesktopViewport()) {
   if (wanted) loadAvatarModule().then(syncAvatarRunState);
 }
 els.avatarToggle.addEventListener("click", () => setAvatarWanted(!avatarWanted()));
+
+// Avatar dropdown lives in settings (always available client-side, unlike
+// server-pushed voices) — populate/persist regardless of viewport.
+function populateAvatarSelect() {
+  if (!els.avatarSelect) return;
+  const cur = selectedAvatarId();
+  els.avatarSelect.innerHTML = "";
+  AVATAR_REGISTRY.forEach(e => {
+    const opt = document.createElement("option");
+    opt.value = e.id; opt.textContent = e.name; opt.selected = e.id === cur;
+    els.avatarSelect.appendChild(opt);
+  });
+}
+populateAvatarSelect();
+els.avatarSelect.addEventListener("change", () => switchAvatar(els.avatarSelect.value));
 
 // ── Go ───────────────────────────────────────────────────────────────
 connect();
