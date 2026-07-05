@@ -1816,6 +1816,10 @@ function populatePersonaSelect() {
   const personas = loadPersonas();
   let active = ""; try { active = localStorage.getItem(PERSONA_ACTIVE_KEY) || ""; } catch {}
   els.personaSelect.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "__default__";
+  defaultOpt.textContent = "Default";
+  els.personaSelect.appendChild(defaultOpt);
   const customOpt = document.createElement("option");
   customOpt.value = "";
   customOpt.textContent = "— custom —";
@@ -1826,11 +1830,22 @@ function populatePersonaSelect() {
     opt.textContent = name;
     els.personaSelect.appendChild(opt);
   });
-  els.personaSelect.value = Object.prototype.hasOwnProperty.call(personas, active) ? active : "";
+  const freshState = Object.keys(personas).length === 0 && !active && !els.personaInput.value;
+  if (active === "__default__" || freshState) {
+    els.personaSelect.value = "__default__";
+  } else {
+    els.personaSelect.value = Object.prototype.hasOwnProperty.call(personas, active) ? active : "";
+  }
 }
 els.personaSelect.addEventListener("change", () => {
   const name = els.personaSelect.value;
-  if (name) {
+  if (name === "__default__") {
+    els.personaInput.value = "";
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "config_set", persona: "" }));
+    }
+  } else if (name) {
     const personas = loadPersonas();
     // Stale option guard (e.g. deleted in another tab): never send "" for a
     // name that no longer exists — resync the select instead.
@@ -1848,6 +1863,9 @@ els.personaSaveBtn.addEventListener("click", () => {
   const name = els.personaNameInput.value.trim();
   if (!name) return;
   const personas = loadPersonas();
+  if (name in personas && personas[name] !== els.personaInput.value) {
+    if (!confirm("Overwrite persona \"" + name + "\"?")) return;
+  }
   personas[name] = els.personaInput.value;
   savePersonas(personas);
   try { localStorage.setItem(PERSONA_ACTIVE_KEY, name); } catch {}
@@ -1856,11 +1874,18 @@ els.personaSaveBtn.addEventListener("click", () => {
 });
 els.personaDeleteBtn.addEventListener("click", () => {
   const name = els.personaSelect.value;
-  if (!name) return;
+  if (!name || name === "__default__") return;
   const personas = loadPersonas();
   delete personas[name];
   savePersonas(personas);
-  try { localStorage.setItem(PERSONA_ACTIVE_KEY, ""); } catch {}
+  let active = ""; try { active = localStorage.getItem(PERSONA_ACTIVE_KEY) || ""; } catch {}
+  if (active === name) {
+    els.personaInput.value = "";
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "config_set", persona: "" }));
+    }
+  }
   populatePersonaSelect();
 });
 populatePersonaSelect();
@@ -1904,10 +1929,15 @@ function renderConfigState(ev) {
   if (document.activeElement !== els.personaInput) {
     els.personaInput.value = ev.persona || "";
     const personas = loadPersonas();
+    const defaultPersona = ev.default_persona || "";
     const matchName = Object.keys(personas).find((name) => personas[name] === (ev.persona || ""));
-    const active = matchName || "";
+    const onDefault = (ev.persona || "") === defaultPersona;
+    const active = matchName || (onDefault ? "__default__" : "");
     els.personaSelect.value = active;
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, active); } catch {}
+    els.personaInput.placeholder = defaultPersona
+      ? "Default: " + (defaultPersona.length > 60 ? defaultPersona.slice(0, 60) + "…" : defaultPersona)
+      : "Leave empty to restore default persona";
   }
 
   const voices = ev.voices || [];

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Optional
 
 import httpx
@@ -41,6 +42,7 @@ class BrainControl:
         # args-class init_chat_prompt default. Empty persona restores this,
         # it never means "no system prompt".
         self.default_persona = runtime_config.session.instructions or ""
+        self._config_lock = threading.Lock()
         self.tools_armed = 0
         try:
             armed = voice_tools.get_tool_defs()
@@ -140,6 +142,7 @@ class BrainControl:
             "type": "config_state",
             "active_brain": self.active_brain,
             "persona": self.runtime_config.session.instructions or "",
+            "default_persona": self.default_persona or "",
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
             "voices": self._predefined_voices() if self.tts_handler else [],
             "tools_armed": self.tools_armed,
@@ -158,38 +161,51 @@ class BrainControl:
     def _config_set(self, msg: dict[str, Any]) -> dict[str, Any]:
         if "permission_respond" in msg:
             return self._handle_permission_respond(msg["permission_respond"])
-        if "brain" in msg:
-            ok, error = self._set_brain(msg["brain"])
-            if not ok:
-                return {"type": "config_ack", "ok": False, "error": error}
-        if "voice" in msg:
-            ok, error = self._set_voice(msg["voice"])
-            if not ok:
-                return {"type": "config_ack", "ok": False, "error": error}
-        if "persona" in msg:
-            persona = msg["persona"]
-            self.runtime_config.session.instructions = persona if persona else (self.default_persona or None)
-        if msg.get("reset_chat"):
-            self.runtime_config.chat.reset()
-        if msg.get("reload_tools"):
-            try:
-                armed = voice_tools.get_tool_defs()
-                self.runtime_config.session.tools = armed
-                self.tools_armed = len(armed)
-                logger.info("BrainControl: tools reloaded (%d armed)", self.tools_armed)
-            except Exception as e:
-                logger.warning("BrainControl: tool reload failed: %s", e)
-                return {"type": "config_ack", "ok": False, "error": f"tool reload failed: {e}"}
 
-        return {
-            "type": "config_ack",
-            "ok": True,
-            "active_brain": self.active_brain,
-            "model": self.llm_handler.model_name,
-            "persona": self.runtime_config.session.instructions or "",
-            "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
-            "tools_armed": self.tools_armed,
-        }
+        with self._config_lock:
+            chat_reset = False
+
+            if "brain" in msg:
+                prev_brain = self.active_brain
+                ok, error = self._set_brain(msg["brain"])
+                if not ok:
+                    return {"type": "config_ack", "ok": False, "error": error}
+                if self.active_brain != prev_brain:
+                    chat_reset = True
+            if "voice" in msg:
+                ok, error = self._set_voice(msg["voice"])
+                if not ok:
+                    return {"type": "config_ack", "ok": False, "error": error}
+            if "persona" in msg:
+                persona = msg["persona"]
+                new_instructions = persona if persona else (self.default_persona or None)
+                if new_instructions != self.runtime_config.session.instructions:
+                    self.runtime_config.session.instructions = new_instructions
+                    chat_reset = True
+            if msg.get("reset_chat"):
+                chat_reset = True
+            if chat_reset:
+                self.runtime_config.chat.reset()
+            if msg.get("reload_tools"):
+                try:
+                    armed = voice_tools.get_tool_defs()
+                    self.runtime_config.session.tools = armed
+                    self.tools_armed = len(armed)
+                    logger.info("BrainControl: tools reloaded (%d armed)", self.tools_armed)
+                except Exception as e:
+                    logger.warning("BrainControl: tool reload failed: %s", e)
+                    return {"type": "config_ack", "ok": False, "error": f"tool reload failed: {e}"}
+
+            return {
+                "type": "config_ack",
+                "ok": True,
+                "active_brain": self.active_brain,
+                "model": self.llm_handler.model_name,
+                "persona": self.runtime_config.session.instructions or "",
+                "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
+                "tools_armed": self.tools_armed,
+                "chat_reset": chat_reset,
+            }
 
     def _handle_permission_respond(self, payload: Any) -> dict[str, Any]:
         if self.cockpit is None:
