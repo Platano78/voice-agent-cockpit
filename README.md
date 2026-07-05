@@ -171,7 +171,7 @@ clickable **Links card** in the cockpit.
 
 Set `VOICE_TOOLS_DIR=/path/to/dir` to drop in extra tools without editing repo
 files — one `.py` per tool exposing a `TOOL_DEF` dict and a `run()` callable
-(see `examples/tools/current_time.py`). This **executes your Python on your
+(see `examples/tools/` for five ready-to-copy tools (clock, model-server status, service health, GPU status, news headlines) — edit each file's EDIT-ME constants for your own endpoints). This **executes your Python on your
 box**, so treat the directory with the same trust as editing config. Drop-ins
 arm unconditionally when the directory is set (unless `VOICE_TOOLS` pins the
 list); a broken file is skipped with a logged warning rather than crashing the
