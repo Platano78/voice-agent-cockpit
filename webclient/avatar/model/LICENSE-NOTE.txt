@@ -36,3 +36,32 @@ eyeBlinkLeft, etc.) required for lip-sync. Uses its own mesh/material naming con
 same semantic material slots (hair/skin/top/eyes) used by themes.json.
 
 Same license tier as brunette-t.glb (non-commercial) — placeholder/personal-use asset.
+
+---
+
+Avatar: avaturn.glb, mpfb.glb, vroid.glb, brunette.glb (4 additional 3D heads
+added to the avatar dropdown; brunette.glb is the A-pose variant of "brunette-t.glb")
+
+Source: https://github.com/met4citizen/TalkingHead
+Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/{avaturn,mpfb,vroid,brunette}.glb
+Fetched date: 2026-07-05
+
+Per the same TalkingHead README section, each has its OWN license (they are not uniform):
+
+  Example avatar "brunette.glb" was created at Ready Player Me (https://readyplayer.me/).
+  Free to all developers for non-commercial use under CC BY-NC 4.0 DEED — same terms as
+  brunette-t.glb above.
+
+  Example avatar "mpfb.glb" was created using Blender and the MPFB extension
+  (https://static.makehumancommunity.org/mpfb.html). Licensed under CC0
+  (https://creativecommons.org/public-domain/cc0/) — public domain.
+
+  Example avatar "avatar.glb" (fetched here as "avaturn.glb", matching this repo's own
+  avatars/ filename) was created at Avaturn (https://avaturn.me) for non-commercial use.
+
+  Example avatar "vroid.glb" was created using VRoid Studio (https://vroid.com/en/studio)
+  for non-commercial use. Per the README: "The licensing model is not CC0, but very
+  permissive."
+
+All four are placeholder/personal-use assets, same tier as the two above, except mpfb.glb
+which is CC0 (public domain) and thus unrestricted.

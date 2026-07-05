@@ -26,6 +26,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js'; // LOCAL VENDOR PATCH (2026-07-05): meshopt support, see below
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import Stats from 'three/addons/libs/stats.module.js';
@@ -1195,6 +1196,11 @@ class TalkingHead {
 
     // Loader
     const loader = new GLTFLoader();
+    // LOCAL VENDOR PATCH (2026-07-05): the stock library never wires a meshopt decoder, so any
+    // EXT_meshopt_compression GLB (e.g. the vroid ready head, and every GLB the repo's own VRoid
+    // conversion scripts emit) failed with 'setMeshoptDecoder must be called'. The decoder ships
+    // in the vendored three addons; wiring it unconditionally is a no-op for uncompressed files.
+    loader.setMeshoptDecoder( MeshoptDecoder );
 
     // Check if draco loading enabled
     if ( this.dracoEnabled ) {
@@ -1206,7 +1212,9 @@ class TalkingHead {
     let gltf = await loader.loadAsync( avatar.url, onprogress );
 
     // Check the gltf
-    const required = [ this.opt.modelRoot ];
+    // LOCAL VENDOR PATCH (2026-07-05, ported from upstream main): modelRoot is no longer
+    // hard-required — upstream falls back to the scene root (see armature assignment below).
+    const required = [];
     this.posePropNames.forEach( x => required.push( x.split('.')[0] ) );
     required.forEach( x => {
       if ( !gltf.scene.getObjectByName(x) ) {
@@ -1240,6 +1248,10 @@ class TalkingHead {
 
     // Avatar full-body
     this.armature = gltf.scene.getObjectByName( this.opt.modelRoot );
+    if ( !this.armature ) {
+      console.warn("Root object '" + this.opt.modelRoot + "' not found, using the default scene as fall-back.");
+      this.armature = gltf.scene;
+    }
     this.armature.scale.setScalar(1);
 
     // Expose GLB animations and userData
