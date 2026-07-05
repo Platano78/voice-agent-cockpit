@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>avatar2d dev harness</title>
+<style>
+  body { font-family: sans-serif; background: #111; color: #eee; padding: 1rem; }
+  #mount { border: 1px solid #444; display: inline-block; }
+  #mount canvas { display: block; max-width: 480px; }
+  #fallback { color: #f66; }
+  button { margin: 0.25rem; }
+</style>
+</head>
+<body>
+<h1>avatar2d.mjs dev harness</h1>
+<p>Scaffold only — not production. Load a speech file into the audio element, click "connect audio", then "start avatar".</p>
+
+<audio id="src" controls crossorigin="anonymous"></audio>
+<div>
+  <button id="connect-btn">connect audio</button>
+  <button id="start-btn">start avatar</button>
+  <button id="stop-btn">stop avatar</button>
+</div>
+
+<div id="mount"></div>
+<div id="fallback" hidden></div>
+
+<script type="module">
+  import { initAvatar2D } from "./avatar/avatar2d.mjs";
+
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const srcEl = document.getElementById("src");
+  const mount = document.getElementById("mount");
+  const fallback = document.getElementById("fallback");
+
+  let mediaSource = null;
+
+  function getMediaSource() {
+    if (!mediaSource) mediaSource = audioCtx.createMediaElementSource(srcEl);
+    return mediaSource;
+  }
+
+  document.getElementById("connect-btn").addEventListener("click", () => {
+    audioCtx.resume();
+    getMediaSource().connect(audioCtx.destination);
+    console.log("[dev-test-2d] audio connected to destination");
+  });
+
+  const hooks = {
+    getPlayCtx: () => audioCtx,
+    setTap: (gain) => {
+      getMediaSource().connect(gain);
+      console.log("[dev-test-2d] tap wired");
+    },
+  };
+
+  let av = null;
+  document.getElementById("start-btn").addEventListener("click", async () => {
+    await audioCtx.resume();
+    if (!av) av = await initAvatar2D(mount, fallback, hooks);
+    av.start();
+    window.av = av;
+  });
+
+  document.getElementById("stop-btn").addEventListener("click", () => {
+    av?.stop();
+  });
+
+  window.audioEl = srcEl;
+  window.audioCtx = audioCtx;
+</script>
+</body>
+</html>

@@ -106,18 +106,21 @@ See `patches/README.md` for what the patch pack changes and why, and
 `systemd/*.template` for a reference of running both processes as systemd
 services.
 
-## Assets NOT bundled
+## Bundled assets & what you supply
 
-Avatar model files (`webclient/avatar/model/*.glb`), vendor binary assets
-(`webclient/avatar/vendor/**/*.bin`), and any theme reference images are
-**not included** in this repo (see `.gitignore` and `NOTICE`) — licensing on
-those is separate from this project's code. Supply your own avatar GLB into
-`webclient/avatar/model/` (compatible with
-[TalkingHead](https://github.com/met4citizen/TalkingHead)) and your own theme
-reference images if you use the theming tools under `webclient/themes/`. If
-you want the 2D still-image avatar option, also supply a still image at
-`webclient/avatar/refs/<name>.png` (gitignored, same as the GLBs) — it's
-lip-synced by `webclient/avatar/avatar2d.mjs`.
+**Bundled:** six ready avatar heads in `webclient/avatar/model/` (mirrored from
+the [TalkingHead](https://github.com/met4citizen/TalkingHead) repo's own public
+distribution) — per-file licensing in `webclient/avatar/model/LICENSE-NOTE.txt`
+(`mpfb.glb` is CC0; the rest are non-commercial/personal-use). The HeadAudio
+viseme model (`model-en-mixed.bin`) and vendored three.js/TalkingHead/HeadAudio
+libraries are included (MIT).
+
+**You supply:** a still image at `webclient/avatar/refs/<name>.png` (gitignored)
+if you want the 2D still-image avatar — it's lip-synced by
+`webclient/avatar/avatar2d.mjs`; and your own theme reference images if you use
+the theming tools under `webclient/themes/`. You can also drop in any extra
+TalkingHead-compatible GLB and add one line to `AVATAR_REGISTRY` in
+`webclient/index.html`.
 
 ## Optional integrations
 
@@ -134,9 +137,13 @@ them.
 | `HERMES_MCP_URL` | `http://localhost:8088/mcp` | optional Hermes MCP endpoint (cockpit brain) |
 | `QMD_MCP_URL` | `http://localhost:8070/mcp` | optional QMD knowledge endpoint (voice tools) |
 
-## Attribution
+## Attribution & acknowledgments
 
-- [`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech) — Apache-2.0
-- [`met4citizen/TalkingHead`](https://github.com/met4citizen/TalkingHead) — MIT
+This project borrows ideas as well as code, and gladly says so:
 
-See `NOTICE` for full attribution and licensing notes.
+- [`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech) (Apache-2.0) — the STT/LLM/TTS pipeline this cockpit drives.
+- [`met4citizen/TalkingHead`](https://github.com/met4citizen/TalkingHead) + HeadAudio by Mika Suominen (MIT) — the 3D avatar + audio-driven lip-sync approach, the ready-head roster, and the Blender avatar pipelines that shaped this project's avatar architecture.
+- Ready Player Me, AvatarSDK, Avaturn, VRoid Studio, and the MakeHuman/MPFB community — creators of the bundled example heads.
+- Classic visual-novel / Live2D-style talking portraits — the inspiration for the 2D still-image avatar path.
+
+See `NOTICE` for full attribution and per-asset licensing.
