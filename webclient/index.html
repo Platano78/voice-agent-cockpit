@@ -811,8 +811,21 @@
     font: 13px/1.4 inherit;
     resize: vertical;
   }
-  #voiceSelect, #avatarSelect {
+  #voiceSelect, #avatarSelect, #personaSelect {
     width: 100%;
+    min-height: 44px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    font: 13px/1.4 inherit;
+  }
+  #personaLibRow { display: flex; gap: 6px; }
+  #personaLibRow .panelBtn { width: auto; flex: 0 0 auto; margin-top: 0; padding: 8px 12px; }
+  #personaNameInput {
+    flex: 1;
+    min-width: 0;
     min-height: 44px;
     background: var(--bg);
     color: var(--text);
@@ -1176,7 +1189,13 @@
   <div class="label">Brain</div>
   <div id="brainList"></div>
   <div class="label">Persona</div>
+  <select id="personaSelect"></select>
   <textarea id="personaInput" placeholder="Leave empty to restore default persona"></textarea>
+  <div id="personaLibRow">
+    <input type="text" id="personaNameInput" placeholder="Save as…" maxlength="40">
+    <button class="panelBtn" id="personaSaveBtn">Save</button>
+    <button class="panelBtn" id="personaDeleteBtn">Delete</button>
+  </div>
   <div class="label" id="voiceLabel" hidden>Voice</div>
   <select id="voiceSelect" hidden></select>
   <button class="panelBtn primary" id="applyPersonaBtn">Apply</button>
@@ -1310,6 +1329,10 @@ const els = {
   brainStatus: document.getElementById("brainStatus"),
   brainList: document.getElementById("brainList"),
   personaInput: document.getElementById("personaInput"),
+  personaSelect: document.getElementById("personaSelect"),
+  personaNameInput: document.getElementById("personaNameInput"),
+  personaSaveBtn: document.getElementById("personaSaveBtn"),
+  personaDeleteBtn: document.getElementById("personaDeleteBtn"),
   voiceLabel: document.getElementById("voiceLabel"),
   voiceSelect: document.getElementById("voiceSelect"),
   avatarSelect: document.getElementById("avatarSelect"),
@@ -1748,6 +1771,68 @@ els.gearBtn.addEventListener("click", () => {
 els.settingsOverlay.addEventListener("click", closeSettings);
 els.settingsCloseBtn.addEventListener("click", closeSettings);
 
+// ── Persona library (localStorage, per-browser) ─────────────────────────
+const PERSONA_LIB_KEY = "va-personas";
+const PERSONA_ACTIVE_KEY = "va-persona-active";
+function loadPersonas() {
+  try { return JSON.parse(localStorage.getItem(PERSONA_LIB_KEY)) || {}; } catch { return {}; }
+}
+function savePersonas(obj) {
+  try { localStorage.setItem(PERSONA_LIB_KEY, JSON.stringify(obj)); } catch {}
+}
+function populatePersonaSelect() {
+  const personas = loadPersonas();
+  let active = ""; try { active = localStorage.getItem(PERSONA_ACTIVE_KEY) || ""; } catch {}
+  els.personaSelect.innerHTML = "";
+  const customOpt = document.createElement("option");
+  customOpt.value = "";
+  customOpt.textContent = "— custom —";
+  els.personaSelect.appendChild(customOpt);
+  Object.keys(personas).sort().forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    els.personaSelect.appendChild(opt);
+  });
+  els.personaSelect.value = Object.prototype.hasOwnProperty.call(personas, active) ? active : "";
+}
+els.personaSelect.addEventListener("change", () => {
+  const name = els.personaSelect.value;
+  if (name) {
+    const personas = loadPersonas();
+    // Stale option guard (e.g. deleted in another tab): never send "" for a
+    // name that no longer exists — resync the select instead.
+    if (!(name in personas)) { populatePersonaSelect(); return; }
+    els.personaInput.value = personas[name] || "";
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, name); } catch {}
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "config_set", persona: els.personaInput.value }));
+    }
+  } else {
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, ""); } catch {}
+  }
+});
+els.personaSaveBtn.addEventListener("click", () => {
+  const name = els.personaNameInput.value.trim();
+  if (!name) return;
+  const personas = loadPersonas();
+  personas[name] = els.personaInput.value;
+  savePersonas(personas);
+  try { localStorage.setItem(PERSONA_ACTIVE_KEY, name); } catch {}
+  populatePersonaSelect();
+  els.personaNameInput.value = "";
+});
+els.personaDeleteBtn.addEventListener("click", () => {
+  const name = els.personaSelect.value;
+  if (!name) return;
+  const personas = loadPersonas();
+  delete personas[name];
+  savePersonas(personas);
+  try { localStorage.setItem(PERSONA_ACTIVE_KEY, ""); } catch {}
+  populatePersonaSelect();
+});
+populatePersonaSelect();
+
 function renderConfigState(ev) {
   const active = ev.brains.find((b) => b.name === ev.active_brain);
   els.brainStatus.textContent = `Active: ${active ? active.label : ev.active_brain}`;
@@ -1786,6 +1871,11 @@ function renderConfigState(ev) {
   // Don't clobber text the user is actively editing.
   if (document.activeElement !== els.personaInput) {
     els.personaInput.value = ev.persona || "";
+    const personas = loadPersonas();
+    const matchName = Object.keys(personas).find((name) => personas[name] === (ev.persona || ""));
+    const active = matchName || "";
+    els.personaSelect.value = active;
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, active); } catch {}
   }
 
   const voices = ev.voices || [];
