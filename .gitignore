@@ -1,12 +1,17 @@
 # Secrets / host-specific config
 brains.json
 
-# Proprietary / large avatar assets (not redistributed — see NOTICE)
-webclient/avatar/model/*.glb
-webclient/avatar/vendor/**/*.bin
+# Non-redistributable avatar assets (images + local-only refs — see NOTICE)
 webclient/avatar/refs/
 webclient/avatar/**/*.png
 webclient/avatar/**/*.jpg
+
+# Dev snapshots / editor backups (not part of the distribution)
+*.bak
+*.bak.pre-*
+
+# Internal design scratch (reference mockups, not redistributable)
+webclient/themes/_refs/
 
 # Python
 __pycache__/
