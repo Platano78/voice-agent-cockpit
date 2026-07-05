@@ -171,6 +171,7 @@ export async function initAvatar2D(mountNode, fallbackNode, hooks) {
   }
 
   cv = document.createElement("canvas");
+  cv.className = "avatar2d"; // scoped CSS hook: object-fit letterboxing (2D still is portrait; pane is landscape)
   offscreen = document.createElement("canvas");
   if (mountNode) mountNode.appendChild(cv);
 

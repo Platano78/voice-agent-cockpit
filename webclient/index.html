@@ -315,6 +315,8 @@
     #avatarPane.collapsed { height: 40px; }
     #avatarMount { flex: 1; min-height: 0; }
     #avatarMount canvas { display: block; width: 100%; height: 100%; }
+    /* 2D still avatar: portrait image in a landscape pane — letterbox, never stretch/crop */
+    #avatarMount canvas.avatar2d { object-fit: contain; }
     #avatarPane.collapsed #avatarMount,
     #avatarPane.collapsed #avatarFallback { display: none; }
     #avatarFallback {
