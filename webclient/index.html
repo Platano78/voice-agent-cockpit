@@ -1202,6 +1202,7 @@
   <select id="voiceSelect" hidden></select>
   <button class="panelBtn primary" id="applyPersonaBtn">Apply</button>
   <button class="panelBtn" id="resetChatBtn">Reset chat</button>
+  <button class="panelBtn" id="reloadToolsBtn">Reload tools</button>
   <div class="panelFrame" aria-hidden="true"></div>
 </aside>
 
@@ -1347,6 +1348,7 @@ const els = {
   avatarSelect: document.getElementById("avatarSelect"),
   applyPersonaBtn: document.getElementById("applyPersonaBtn"),
   resetChatBtn: document.getElementById("resetChatBtn"),
+  reloadToolsBtn: document.getElementById("reloadToolsBtn"),
   themeSwatches: document.getElementById("themeSwatches"),
   historyList: document.getElementById("historyList"),
   sessionBrain: document.getElementById("sessionBrain"),
@@ -1939,6 +1941,11 @@ els.resetChatBtn.addEventListener("click", () => {
   if (els.sessionMood) els.sessionMood.textContent = "neutral";
   window.__avatarMood?.("neutral"); // this handler bypasses applyMoodFromTools — keep the avatar in sync too
 });
+els.reloadToolsBtn.addEventListener("click", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", reload_tools: true }));
+  }
+});
 els.voiceSelect.addEventListener("change", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", voice: els.voiceSelect.value }));
@@ -2078,6 +2085,9 @@ function handleEvent(text) {
       if (ev.ok) {
         log(`brain=${ev.active_brain} model=${ev.model}`);
         if (ev.model) lastKnownModel = ev.model;
+        if (typeof ev.tools_armed === "number" && els.sessionTools) {
+          els.sessionTools.textContent = ev.tools_armed + " armed";
+        }
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "config_get" })); // resync panel (brain/persona/reset all land here)
         }

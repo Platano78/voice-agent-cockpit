@@ -174,8 +174,10 @@ files — one `.py` per tool exposing a `TOOL_DEF` dict and a `run()` callable
 (see `examples/tools/current_time.py`). This **executes your Python on your
 box**, so treat the directory with the same trust as editing config. Drop-ins
 arm unconditionally when the directory is set (unless `VOICE_TOOLS` pins the
-list); restart the service to pick up changes, and a broken file is skipped
-with a logged warning rather than crashing the pipeline.
+list); a broken file is skipped with a logged warning rather than crashing the
+pipeline. No restart needed to pick up changes — the settings panel's
+"Reload tools" button re-probes and re-arms live (also
+`{"type":"config_set", "reload_tools":true}` over the WS).
 
 ## Attribution & acknowledgments
 

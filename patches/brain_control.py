@@ -171,6 +171,15 @@ class BrainControl:
             self.runtime_config.session.instructions = persona if persona else (self.default_persona or None)
         if msg.get("reset_chat"):
             self.runtime_config.chat.reset()
+        if msg.get("reload_tools"):
+            try:
+                armed = voice_tools.get_tool_defs()
+                self.runtime_config.session.tools = armed
+                self.tools_armed = len(armed)
+                logger.info("BrainControl: tools reloaded (%d armed)", self.tools_armed)
+            except Exception as e:
+                logger.warning("BrainControl: tool reload failed: %s", e)
+                return {"type": "config_ack", "ok": False, "error": f"tool reload failed: {e}"}
 
         return {
             "type": "config_ack",
@@ -179,6 +188,7 @@ class BrainControl:
             "model": self.llm_handler.model_name,
             "persona": self.runtime_config.session.instructions or "",
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
+            "tools_armed": self.tools_armed,
         }
 
     def _handle_permission_respond(self, payload: Any) -> dict[str, Any]:
