@@ -1408,6 +1408,7 @@
     </div>
     <div class="hint">Hold to talk, or press and hold Space. Release to send.</div>
     <button type="button" class="diagToggle" id="diagToggle">Diagnostics</button>
+    <button type="button" class="diagToggle" id="camBtn" aria-pressed="false">📷 Camera off</button>
     <div id="log" hidden></div>
   </main>
 
@@ -1479,6 +1480,7 @@ const els = {
   applyPersonaBtn: document.getElementById("applyPersonaBtn"),
   resetChatBtn: document.getElementById("resetChatBtn"),
   reloadToolsBtn: document.getElementById("reloadToolsBtn"),
+  camBtn: document.getElementById("camBtn"),
   themeSwatches: document.getElementById("themeSwatches"),
   historyList: document.getElementById("historyList"),
   sessionBrain: document.getElementById("sessionBrain"),
@@ -2169,6 +2171,46 @@ function connect() {
     }
   };
 }
+
+// ── Camera vision: stream frames to the server so the `look` tool can see. ──
+// OFF by default (privacy). Frames are sent ONLY while the toggle is on, as text
+// control frames the websocket streamer writes to /dev/shm for the `look` tool.
+let camStream = null, camVideo = null, camCanvas = null, camTimer = null;
+const CAM_INTERVAL_MS = 1500, CAM_EDGE = 512, CAM_QUALITY = 0.8;
+
+async function startCamera() {
+  if (camStream) return;
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, facingMode: "environment" } });
+  } catch (e) { camStream = null; log("camera denied: " + e.message); return; }
+  camVideo = document.createElement("video");
+  camVideo.playsInline = true; camVideo.muted = true; camVideo.srcObject = camStream;
+  try { await camVideo.play(); } catch {}
+  camCanvas = document.createElement("canvas");
+  camTimer = setInterval(sendCameraFrame, CAM_INTERVAL_MS);
+  els.camBtn.setAttribute("aria-pressed", "true");
+  els.camBtn.textContent = "📷 Camera on";
+  log("camera on");
+}
+function stopCamera() {
+  if (camTimer) { clearInterval(camTimer); camTimer = null; }
+  if (camStream) { camStream.getTracks().forEach((t) => t.stop()); camStream = null; }
+  camVideo = null; camCanvas = null;
+  els.camBtn.setAttribute("aria-pressed", "false");
+  els.camBtn.textContent = "📷 Camera off";
+  log("camera off");
+}
+function sendCameraFrame() {
+  if (!camStream || !camVideo || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const vw = camVideo.videoWidth, vh = camVideo.videoHeight;
+  if (!vw || !vh) return;
+  const scale = Math.min(1, CAM_EDGE / Math.max(vw, vh));
+  camCanvas.width = Math.round(vw * scale); camCanvas.height = Math.round(vh * scale);
+  camCanvas.getContext("2d").drawImage(camVideo, 0, 0, camCanvas.width, camCanvas.height);
+  const b64 = camCanvas.toDataURL("image/jpeg", CAM_QUALITY).split(",")[1];
+  if (b64) ws.send(JSON.stringify({ type: "camera_frame", data: b64 }));
+}
+els.camBtn.addEventListener("click", () => { camStream ? stopCamera() : startCamera(); });
 
 const MOOD_VALUES = ["neutral", "happy", "excited", "thinking", "concerned", "playful", "serious"];
 
