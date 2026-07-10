@@ -1,6 +1,9 @@
 import asyncio
+import base64
 import json
 import logging
+import os
+import time
 from queue import Empty, Queue
 from threading import Event
 from typing import Any, Callable
@@ -14,6 +17,13 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 
 logger = logging.getLogger(__name__)
+
+# Camera-vision: the webclient streams frames as {"type":"camera_frame","data":<b64 jpeg>};
+# we write the latest to this tmpfs path for the `look` voice tool to read. Rate-limited +
+# size-capped, atomic replace, best-effort (never fatal to the audio loop).
+_CAMERA_FRAME_PATH = os.environ.get("VOICE_CAMERA_FRAME", "/dev/shm/voice_camera_frame.jpg")
+_CAMERA_MIN_INTERVAL_S = 1.0
+_CAMERA_MAX_BYTES = 2_000_000
 
 
 class WebSocketStreamer:
@@ -47,6 +57,7 @@ class WebSocketStreamer:
         self.clients: set[ServerConnection] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any = None
+        self._last_cam_write = 0.0
 
     def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
@@ -150,7 +161,9 @@ class WebSocketStreamer:
                     if not isinstance(msg, dict):
                         logger.debug(f"Client {client_id}: ignoring non-object text frame")
                         continue
-                    if msg.get("type") in ("config_get", "config_set") and self.control_callback:
+                    if msg.get("type") == "camera_frame":
+                        await asyncio.to_thread(self._write_camera_frame, msg.get("data"))
+                    elif msg.get("type") in ("config_get", "config_set") and self.control_callback:
                         result = await asyncio.to_thread(self.control_callback, msg)
                         await websocket.send(json.dumps(result))
                     else:
@@ -165,6 +178,26 @@ class WebSocketStreamer:
             if len(self.clients) == 0:
                 logger.debug("Last WebSocket client disconnected, ending session")
                 self.input_queue.put(SESSION_END)
+
+    def _write_camera_frame(self, data: Any) -> None:
+        """Write the latest client camera frame to the tmpfs path the `look` vision
+        tool reads. Rate-limited + size-capped, atomic replace, never raises."""
+        try:
+            if not isinstance(data, str):
+                return
+            now = time.monotonic()
+            if now - self._last_cam_write < _CAMERA_MIN_INTERVAL_S:
+                return
+            raw = base64.b64decode(data, validate=True)
+            if not raw or len(raw) > _CAMERA_MAX_BYTES:
+                return
+            tmp = f"{_CAMERA_FRAME_PATH}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(raw)
+            os.replace(tmp, _CAMERA_FRAME_PATH)
+            self._last_cam_write = now
+        except Exception as e:
+            logger.debug("camera_frame write failed: %r", e)
 
     async def _send_loop(self) -> None:
         """Send audio and text from queues to all connected clients."""
