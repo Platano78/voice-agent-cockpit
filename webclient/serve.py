@@ -15,6 +15,7 @@ doesn't spam the voice-agent websocket server with bare-TCP-connect noise.
 import argparse
 import json
 import os
+import ssl
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,10 +81,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument("--certfile", help="TLS cert (PEM); with --keyfile, serves HTTPS")
+    ap.add_argument("--keyfile", help="TLS private key (PEM)")
     args = ap.parse_args()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Serving {HERE} on http://{args.host}:{args.port}", flush=True)
+    scheme = "http"
+    if args.certfile and args.keyfile:
+        # HTTPS lets the LAN origin be a secure context so the lip-sync
+        # AudioWorklet runs without Tailscale. stdlib ssl, no dependency.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https"
+    print(f"Serving {HERE} on {scheme}://{args.host}:{args.port}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

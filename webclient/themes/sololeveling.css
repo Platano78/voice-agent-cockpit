@@ -27,11 +27,11 @@
   --bg: #05050c;
   --surface: rgba(14, 15, 32, 0.72);
   --surface-2: rgba(10, 11, 26, 0.6);
-  --border: rgba(139, 92, 246, 0.32);
+  --border: rgba(34, 217, 255, 0.32);
   --text: #e7ecff;
   --text-muted: rgba(198, 208, 255, 0.56);
   --accent: #22d9ff;
-  --accent-2: #8b5cf6;
+  --accent-2: #22d9ff;
   --rec: #ff2f6d;
   --ok: #35e3a0;
   --warn: #ffcc33;
@@ -49,7 +49,7 @@
   --ptt-radius: 6px;
 }
 
-/* ── #fxBack: living void-mist backdrop. Layered indigo/violet/cyan bloom +
+/* ── #fxBack: living void-mist backdrop. Layered cyan/teal bloom +
    faint grid, passed through the shared #vaMist SVG filter (feTurbulence +
    feDisplacementMap + feGaussianBlur — pre-blurred, static). Per the perf
    laws: never animate blur — only opacity/transform animate here, and
@@ -61,11 +61,11 @@
 [data-theme="sololeveling"] #fxBack {
   display: block;
   background:
-    radial-gradient(ellipse 900px 650px at 18% -8%, rgba(139, 92, 246, 0.32), transparent 60%),
+    radial-gradient(ellipse 900px 650px at 18% -8%, rgba(34, 217, 255, 0.28), transparent 60%),
     radial-gradient(ellipse 760px 620px at 102% 105%, rgba(34, 217, 255, 0.22), transparent 62%),
-    radial-gradient(ellipse 640px 520px at 55% 45%, rgba(76, 20, 130, 0.30), transparent 68%),
-    repeating-linear-gradient(0deg, rgba(139, 92, 246, 0.025) 0px, rgba(139, 92, 246, 0.025) 1px, transparent 1px, transparent 32px),
-    repeating-linear-gradient(90deg, rgba(139, 92, 246, 0.025) 0px, rgba(139, 92, 246, 0.025) 1px, transparent 1px, transparent 32px),
+    radial-gradient(ellipse 640px 520px at 55% 45%, rgba(15, 118, 140, 0.30), transparent 68%),
+    repeating-linear-gradient(0deg, rgba(34, 217, 255, 0.025) 0px, rgba(34, 217, 255, 0.025) 1px, transparent 1px, transparent 32px),
+    repeating-linear-gradient(90deg, rgba(34, 217, 255, 0.025) 0px, rgba(34, 217, 255, 0.025) 1px, transparent 1px, transparent 32px),
     var(--bg);
   filter: url(#vaMist) brightness(calc(1 + var(--level, 0) * 0.35));
   animation: sololevelingMistDrift 48s ease-in-out infinite;

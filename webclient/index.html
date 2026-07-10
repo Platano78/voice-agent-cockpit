@@ -1133,6 +1133,136 @@
     opacity: 1;
     box-shadow: 0 0 8px var(--rec);
   }
+
+  /* ── Immersive viewport takeover on mobile ────────────────────────────
+     Mirrors the desktop immersive treatment for phones. Gated behind
+     .avatar-immersive — additive, zero effect for other avatars.
+     #avatarPane is display:none at base level; this overrides for immersive only. ── */
+  .avatar-immersive #avatarPane {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    width: 100vw;
+    height: 100vh;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    overflow: hidden;
+  }
+  .avatar-immersive #avatarMount {
+    position: absolute;
+    inset: 0;
+  }
+  .avatar-immersive #avatarToggle { display: none; }
+  .avatar-immersive #avatarFallback { display: none !important; }
+  /* Float main content above the 3D scene with translucent panels */
+  .avatar-immersive main {
+    position: relative;
+    z-index: 10;
+  }
+  .avatar-immersive main .card {
+    background: rgba(14, 15, 32, 0.78);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  .avatar-immersive #ptt {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 20;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: linear-gradient(to top, rgba(5, 5, 12, 0.92), rgba(5, 5, 12, 0));
+  }
+  /* Immersive frame: bounds the full-bleed scene in the System-window look
+     (inset cyan border + glow + angular cut corners) so it reads as a framed
+     view, not an unbounded image. Fixed to the viewport at every width. */
+  .avatar-immersive #avatarPane::after {
+    content: "";
+    position: fixed;
+    inset: 10px;
+    border: 1px solid color-mix(in srgb, var(--accent, #22d9ff) 60%, transparent);
+    box-shadow: 0 0 24px rgba(34, 217, 255, 0.18), inset 0 0 44px rgba(34, 217, 255, 0.06);
+    clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%, 0 18px);
+    pointer-events: none;
+    z-index: 5;
+  }
+  /* ── Immersive viewport takeover (B2 capability) ─────────────────────
+     Scoped entirely behind .avatar-immersive — zero effect when absent.
+     Promotes the avatar canvas to a full-viewport background layer and
+     floats the UI rails / main content above it with translucent panels.
+     Desktop only (inside min-width: 1024px media query). ── */
+  @media (min-width: 1024px) {
+    .avatar-immersive #contentGrid {
+      position: relative;
+      grid-template-columns: 280px minmax(0, 640px) 280px;
+      min-height: 100vh;
+      margin: 0;
+      max-width: none;
+    }
+    .avatar-immersive #avatarMount {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+    .avatar-immersive #avatarMount canvas {
+      width: 100%;
+      height: 100%;
+    }
+    .avatar-immersive #avatarPane {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      width: 100vw;
+      height: 100vh;
+      border: none;
+      box-shadow: none;
+      background: transparent;
+      overflow: hidden;
+    }
+    .avatar-immersive #avatarToggle { display: none; }
+    .avatar-immersive #avatarFallback { display: none !important; }
+    /* Rails float above the immersive canvas */
+    .avatar-immersive #historyRail,
+    .avatar-immersive #sessionRail {
+      position: relative;
+      z-index: 10;
+      background: rgba(14, 15, 32, 0.78);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    /* Main content floats above */
+    .avatar-immersive main {
+      position: relative;
+      z-index: 10;
+    }
+    .avatar-immersive main .card {
+      background: rgba(14, 15, 32, 0.78);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    /* Header floats above */
+    .avatar-immersive header {
+      position: relative;
+      z-index: 10;
+    }
+    /* PTT control floats above */
+    .avatar-immersive #ptt {
+      position: relative;
+      z-index: 10;
+    }
+    /* Banner floats above */
+    .avatar-immersive #bannerMount {
+      position: relative;
+      z-index: 10;
+    }
+    /* fxBack: layer behind content but above the avatar */
+    .avatar-immersive #fxBack {
+      z-index: 1;
+    }
+  }
 </style>
 
 <svg width="0" height="0" aria-hidden="true" style="position:absolute">
@@ -2419,6 +2549,9 @@ function avatarWanted() {
   try { return localStorage.getItem(AVATAR_STORAGE_KEY) !== "off"; } catch { return true; }
 }
 function isDesktopViewport() { return window.matchMedia("(min-width: 1024px)").matches; }
+// Immersive avatars take over the viewport, so they're worth loading on mobile too
+// (regular avatars stay desktop-only, hidden in their 640x300 pane).
+function isImmersiveAvatar(id) { const e = AVATAR_REGISTRY.find(x => x.id === id); return !!e && e.kind === "3d-immersive"; }
 
 // Head selection is USER-owned and persisted under its OWN key, fully
 // decoupled from the theme (theme = colors/lighting/mood only). va-avatar-model
@@ -2438,6 +2571,7 @@ const AVATAR_REGISTRY = [
   { id: "vroid",      name: "VRoid (Anime 3D)",    kind: "3d", model: "./avatar/model/vroid.glb" },
   { id: "brunette-a", name: "Brunette (A-pose)",   kind: "3d", model: "./avatar/model/brunette.glb" },
   { id: "monarch",   name: "Monarch (2D)",   kind: "2d" },
+  { id: "monarch3d", name: "Shadow Monarch (Cinematic)", kind: "3d-immersive" },
 ];
 const DEFAULT_AVATAR_ID = "brunette";
 const AVATAR_MODEL_KEY = "va-avatar-model"; // SEPARATE from "va-avatar" (pane expand/collapse)
@@ -2468,6 +2602,15 @@ async function loadAvatarModule() {
         setTap: (node) => { avatarAudioTapNode = node; },
       });
       currentAvatarKind = "2d";
+    } else if (entry.kind === "3d-immersive") {
+      const mod = await import("./avatar/avatarMonarch3d.mjs");
+      avatarController = await mod.initAvatarMonarch3d(els.avatarMount, els.avatarFallback, {
+        getPlayCtx: ensurePlayCtx,
+        setTap: (node) => { avatarAudioTapNode = node; },
+      });
+      currentAvatarKind = "3d-immersive";
+      // Activate immersive viewport takeover
+      document.documentElement.classList.add("avatar-immersive");
     } else {
       const mod = await import("./avatar/avatar.mjs");
       avatarController = await mod.initAvatar(els.avatarMount, els.avatarFallback, {
@@ -2504,7 +2647,12 @@ async function loadAvatarModule() {
 async function switchAvatar(id) {
   if (!AVATAR_REGISTRY.some(e => e.id === id)) return;
   try { localStorage.setItem(AVATAR_MODEL_KEY, id); } catch {}
-  if (!avatarController) return; // not loaded yet — boot will read the stored id
+  if (!avatarController) {
+    // Boot only auto-loads on desktop (or an immersive avatar on mobile). If the user
+    // picks an immersive avatar on mobile where nothing was loaded, load it on demand.
+    if (isDesktopViewport() || isImmersiveAvatar(id)) { await loadAvatarModule().then(syncAvatarRunState); }
+    return; // not loaded yet — boot will read the stored id
+  }
   const entry = AVATAR_REGISTRY.find(e => e.id === id);
   if (entry.kind === currentAvatarKind) {
     if (entry.kind === "3d") applyAvatarLook(document.documentElement.getAttribute("data-theme"));
@@ -2512,6 +2660,8 @@ async function switchAvatar(id) {
   }
   try { avatarController.destroy?.(); } catch (e) { log("avatar destroy failed: " + e.message); }
   avatarController = null; currentAvatarKind = null;
+  // Remove immersive class if we were in immersive mode
+  document.documentElement.classList.remove("avatar-immersive");
   els.avatarMount.replaceChildren();          // belt-and-braces: clear any leftover canvas
   els.avatarMount.hidden = false;             // a prior fallback may have hidden it
   els.avatarFallback.hidden = true;
@@ -2538,7 +2688,7 @@ function setAvatarWanted(wanted) {
   else syncAvatarRunState();
 }
 
-if (isDesktopViewport()) {
+if (isDesktopViewport() || isImmersiveAvatar(selectedAvatarId())) {
   const wanted = avatarWanted();
   els.avatarPane.classList.toggle("collapsed", !wanted);
   els.avatarToggle.setAttribute("aria-expanded", String(wanted));
