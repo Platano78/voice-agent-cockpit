@@ -26,6 +26,11 @@ _CAMERA_FRAME_PATH = os.environ.get("VOICE_CAMERA_FRAME", "/dev/shm/voice_camera
 _CAMERA_MIN_INTERVAL_S = 1.0
 _CAMERA_MAX_BYTES = 2_000_000
 
+# Screen-share vision: mirror of the camera path above, driven by {"type":"screen_frame",...}.
+_SCREEN_FRAME_PATH = os.environ.get("VOICE_SCREEN_FRAME", "/dev/shm/voice_screen_frame.jpg")
+_SCREEN_MIN_INTERVAL_S = 1.0
+_SCREEN_MAX_BYTES = 2_000_000
+
 
 class WebSocketStreamer:
     """
@@ -59,6 +64,7 @@ class WebSocketStreamer:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any = None
         self._last_cam_write = 0.0
+        self._last_screen_write = 0.0
 
     def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
@@ -164,6 +170,8 @@ class WebSocketStreamer:
                         continue
                     if msg.get("type") == "camera_frame":
                         await asyncio.to_thread(self._write_camera_frame, msg.get("data"))
+                    elif msg.get("type") == "screen_frame":
+                        await asyncio.to_thread(self._write_screen_frame, msg.get("data"))
                     elif msg.get("type") in ("config_get", "config_set") and self.control_callback:
                         result = await asyncio.to_thread(self.control_callback, msg)
                         await websocket.send(json.dumps(result))
@@ -199,6 +207,26 @@ class WebSocketStreamer:
             self._last_cam_write = now
         except Exception as e:
             logger.debug("camera_frame write failed: %r", e)
+
+    def _write_screen_frame(self, data: Any) -> None:
+        """Write the latest client screen-share frame to the tmpfs path the `look` vision
+        tool reads. Rate-limited + size-capped, atomic replace, never raises."""
+        try:
+            if not isinstance(data, str):
+                return
+            now = time.monotonic()
+            if now - self._last_screen_write < _SCREEN_MIN_INTERVAL_S:
+                return
+            raw = base64.b64decode(data, validate=True)
+            if not raw or len(raw) > _SCREEN_MAX_BYTES:
+                return
+            tmp = f"{_SCREEN_FRAME_PATH}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(raw)
+            os.replace(tmp, _SCREEN_FRAME_PATH)
+            self._last_screen_write = now
+        except Exception as e:
+            logger.debug("screen_frame write failed: %r", e)
 
     async def _send_loop(self) -> None:
         """Send audio and text from queues to all connected clients."""

@@ -1409,6 +1409,7 @@
     <div class="hint">Hold to talk, or press and hold Space. Release to send.</div>
     <button type="button" class="diagToggle" id="diagToggle">Diagnostics</button>
     <button type="button" class="diagToggle" id="camBtn" aria-pressed="false">📷 Camera off</button>
+    <button type="button" class="diagToggle" id="screenBtn" aria-pressed="false">🖥️ Screen off</button>
     <div id="log" hidden></div>
   </main>
 
@@ -1481,6 +1482,7 @@ const els = {
   resetChatBtn: document.getElementById("resetChatBtn"),
   reloadToolsBtn: document.getElementById("reloadToolsBtn"),
   camBtn: document.getElementById("camBtn"),
+  screenBtn: document.getElementById("screenBtn"),
   themeSwatches: document.getElementById("themeSwatches"),
   historyList: document.getElementById("historyList"),
   sessionBrain: document.getElementById("sessionBrain"),
@@ -2213,6 +2215,48 @@ function sendCameraFrame() {
   if (b64) ws.send(JSON.stringify({ type: "camera_frame", data: b64 }));
 }
 els.camBtn.addEventListener("click", () => { camStream ? stopCamera() : startCamera(); });
+
+// ── Screen vision: stream frames to the server so the `look` tool can see the user's
+// screen. OFF by default; mirrors the camera path above (same cadence, same text-control-
+// frame convention the websocket streamer writes to /dev/shm for the `look` tool).
+let screenStream = null, screenVideo = null, screenCanvas = null, screenTimer = null;
+const SCREEN_MAX_WIDTH = 1280, SCREEN_QUALITY = 0.8;
+
+async function startScreenShare() {
+  if (screenStream) return;
+  try {
+    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+  } catch (e) { screenStream = null; log("screen share denied: " + e.message); return; }
+  const screenTrack = screenStream.getVideoTracks()[0];
+  if (screenTrack) screenTrack.addEventListener("ended", stopScreenShare); // browser's own "Stop sharing" UI
+  screenVideo = document.createElement("video");
+  screenVideo.playsInline = true; screenVideo.muted = true; screenVideo.srcObject = screenStream;
+  try { await screenVideo.play(); } catch {}
+  screenCanvas = document.createElement("canvas");
+  screenTimer = setInterval(sendScreenFrame, CAM_INTERVAL_MS);
+  els.screenBtn.setAttribute("aria-pressed", "true");
+  els.screenBtn.textContent = "🖥️ Screen on";
+  log("screen share on");
+}
+function stopScreenShare() {
+  if (screenTimer) { clearInterval(screenTimer); screenTimer = null; }
+  if (screenStream) { screenStream.getTracks().forEach((t) => t.stop()); screenStream = null; }
+  screenVideo = null; screenCanvas = null;
+  els.screenBtn.setAttribute("aria-pressed", "false");
+  els.screenBtn.textContent = "🖥️ Screen off";
+  log("screen share off");
+}
+function sendScreenFrame() {
+  if (!screenStream || !screenVideo || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const vw = screenVideo.videoWidth, vh = screenVideo.videoHeight;
+  if (!vw || !vh) return;
+  const scale = Math.min(1, SCREEN_MAX_WIDTH / vw);
+  screenCanvas.width = Math.round(vw * scale); screenCanvas.height = Math.round(vh * scale);
+  screenCanvas.getContext("2d").drawImage(screenVideo, 0, 0, screenCanvas.width, screenCanvas.height);
+  const b64 = screenCanvas.toDataURL("image/jpeg", SCREEN_QUALITY).split(",")[1];
+  if (b64) ws.send(JSON.stringify({ type: "screen_frame", data: b64 }));
+}
+els.screenBtn.addEventListener("click", () => { screenStream ? stopScreenShare() : startScreenShare(); });
 
 const MOOD_VALUES = ["neutral", "happy", "excited", "thinking", "concerned", "playful", "serious"];
 
