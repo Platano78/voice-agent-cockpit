@@ -1574,6 +1574,13 @@ function setTheme(id) {
   }
   document.documentElement.setAttribute("data-theme", id);
   try { localStorage.setItem("va-theme", id); } catch {}
+  // Re-evaluate the immersive viewport takeover for the new theme (only
+  // relevant if a 3d-immersive avatar is the one currently mounted) — the
+  // module's own ResizeObserver (avatarMonarch3d.mjs) reflows it between
+  // full-viewport and the bounded pane, no reload needed.
+  if (currentAvatarKind === "3d-immersive") {
+    document.documentElement.classList.toggle("avatar-immersive", viewportTakeoverActive(selectedAvatarId()));
+  }
   renderThemeSwatches();
   applyAvatarLook(id);
 }
@@ -2725,6 +2732,16 @@ function isDesktopViewport() { return window.matchMedia("(min-width: 1024px)").m
 // Immersive avatars take over the viewport, so they're worth loading on mobile too
 // (regular avatars stay desktop-only, hidden in their 640x300 pane).
 function isImmersiveAvatar(id) { const e = AVATAR_REGISTRY.find(x => x.id === id); return !!e && e.kind === "3d-immersive"; }
+// The viewport takeover itself is further gated by `theme` on the registry entry
+// (monarch3d's cinematic scene is a sololeveling-specific spectacle — hardcoded
+// texture/colors, no window.__avatarTheme hook — not a reusable look for every
+// theme). isImmersiveAvatar() still governs eager module *loading* above; this
+// governs whether the .avatar-immersive CSS takeover should be applied right now.
+function viewportTakeoverActive(id) {
+  const e = AVATAR_REGISTRY.find(x => x.id === id);
+  if (!e || e.kind !== "3d-immersive") return false;
+  return !e.theme || e.theme === document.documentElement.getAttribute("data-theme");
+}
 
 // Head selection is USER-owned and persisted under its OWN key, fully
 // decoupled from the theme (theme = colors/lighting/mood only). va-avatar-model
@@ -2744,7 +2761,7 @@ const AVATAR_REGISTRY = [
   { id: "vroid",      name: "VRoid (Anime 3D)",    kind: "3d", model: "./avatar/model/vroid.glb" },
   { id: "brunette-a", name: "Brunette (A-pose)",   kind: "3d", model: "./avatar/model/brunette.glb" },
   { id: "monarch",   name: "Monarch (2D)",   kind: "2d" },
-  { id: "monarch3d", name: "Shadow Monarch (Cinematic)", kind: "3d-immersive" },
+  { id: "monarch3d", name: "Shadow Monarch (Cinematic)", kind: "3d-immersive", theme: "sololeveling" },
 ];
 const DEFAULT_AVATAR_ID = "brunette";
 const AVATAR_MODEL_KEY = "va-avatar-model"; // SEPARATE from "va-avatar" (pane expand/collapse)
@@ -2782,8 +2799,11 @@ async function loadAvatarModule() {
         setTap: (node) => { avatarAudioTapNode = node; },
       });
       currentAvatarKind = "3d-immersive";
-      // Activate immersive viewport takeover
-      document.documentElement.classList.add("avatar-immersive");
+      // Activate immersive viewport takeover, only if the current theme wants it
+      // (see viewportTakeoverActive) — setTheme() re-toggles this on later theme
+      // changes so the module (already ResizeObserver-driven, see
+      // avatarMonarch3d.mjs) reflows between full-viewport and the bounded pane.
+      document.documentElement.classList.toggle("avatar-immersive", viewportTakeoverActive(entry.id));
     } else {
       const mod = await import("./avatar/avatar.mjs");
       avatarController = await mod.initAvatar(els.avatarMount, els.avatarFallback, {
