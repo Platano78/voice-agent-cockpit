@@ -2158,6 +2158,7 @@ function connect() {
     els.pttCaption.textContent = "Reconnecting…";
     log("ws closed; retrying in 2s");
     releaseWakeLock();
+    stallWatchdog.disarm();
     setTimeout(connect, 2000);
   };
   ws.onerror = () => { log("ws error"); };
@@ -2167,6 +2168,7 @@ function connect() {
       handleEvent(ev.data);
     } else {
       // ArrayBuffer (binaryType='arraybuffer'). Int16 16k mono PCM.
+      stallWatchdog.disarm(); // real assistant audio has arrived — stop filling the gap
       enqueuePlayback(ev.data);
     }
   };
@@ -2242,8 +2244,10 @@ function handleEvent(text) {
         pushHistoryEntry(pendingHistoryEntry);
       }
       pendingHistoryEntry = { time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), user: ev.transcript || "—", assistant: null };
+      if (ev.transcript) stallWatchdog.arm(); // turn is committed — start the gap-fill timer
       break;
     case "assistant_text": {
+      stallWatchdog.disarm();
       const text = ev.text || "";
       els.assistant.textContent = text || "—";
       applyMoodFromTools(ev.tools);
@@ -2358,6 +2362,88 @@ function flushPlayback() {
   updateSpeakingIndicator();
 }
 
+// ── Stall watchdog ───────────────────────────────────────────────────
+// Fills the gap between "user stopped talking" and "first assistant audio"
+// with a short pre-synthesized filler clip so a cold/slow LLM turn doesn't
+// read as a dead connection. Pure progressive enhancement: if the clips
+// fail to load/decode, the feature disables itself and everything else
+// behaves exactly as before.
+const STALL_CLIP_URLS = ["stall/stall1.wav", "stall/stall2.wav", "stall/stall3.wav", "stall/stall4.wav"];
+const STALL_FIRST_DELAY_MS = 2500;
+const STALL_REPEAT_DELAY_MS = 6000;
+const STALL_MAX_PER_TURN = 2;
+
+const stallWatchdog = {
+  enabled: false,
+  buffers: [],
+  lastClipIndex: -1,
+  timers: [],
+  activeSource: null,
+  firedCount: 0,
+
+  async init() {
+    try {
+      const ctx = ensurePlayCtx();
+      this.buffers = await Promise.all(STALL_CLIP_URLS.map(async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`${url}: ${res.status}`);
+        return ctx.decodeAudioData(await res.arrayBuffer());
+      }));
+      this.enabled = true;
+    } catch (e) {
+      console.warn("stall watchdog disabled: clip load/decode failed", e);
+    }
+  },
+
+  arm() {
+    if (!this.enabled || capturing) return; // never stall while the user is actively streaming speech
+    this.disarm(); // clear any stale timers/clip left over from a prior turn
+    this.firedCount = 0;
+    this.timers.push(setTimeout(() => this._fire(), STALL_FIRST_DELAY_MS));
+  },
+
+  _fire() {
+    if (this.firedCount >= STALL_MAX_PER_TURN) return;
+    this.firedCount++;
+    this._play();
+    if (this.firedCount < STALL_MAX_PER_TURN) {
+      this.timers.push(setTimeout(() => this._fire(), STALL_REPEAT_DELAY_MS));
+    }
+  },
+
+  _play() {
+    if (!this.buffers.length) return;
+    let idx = Math.floor(Math.random() * this.buffers.length);
+    if (this.buffers.length > 1 && idx === this.lastClipIndex) idx = (idx + 1) % this.buffers.length;
+    this.lastClipIndex = idx;
+
+    const ctx = ensurePlayCtx();
+    const src = ctx.createBufferSource();
+    src.buffer = this.buffers[idx];
+    src.connect(ctx.destination);
+    if (avatarAudioTapNode) src.connect(avatarAudioTapNode);
+    src.start();
+
+    this.activeSource = src;
+    liveSources.add(src);
+    updateSpeakingIndicator();
+    src.onended = () => {
+      liveSources.delete(src);
+      if (this.activeSource === src) this.activeSource = null;
+      updateSpeakingIndicator();
+    };
+  },
+
+  disarm() {
+    for (const t of this.timers) clearTimeout(t);
+    this.timers.length = 0;
+    if (this.activeSource) {
+      try { this.activeSource.stop(); } catch {}
+      this.activeSource = null;
+    }
+  },
+};
+
 // ── Mic capture ──────────────────────────────────────────────────────
 // Primary path: AudioContext({sampleRate:16000}) so the graph runs at 16k and
 // getUserMedia audio is resampled into it by the browser — no manual resampling,
@@ -2449,6 +2535,7 @@ async function startCapture() {
 
   // barge-in: kill any assistant audio the moment the user starts talking
   flushPlayback();
+  stallWatchdog.disarm();
 
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
@@ -2756,4 +2843,5 @@ els.avatarSelect.addEventListener("change", () => switchAvatar(els.avatarSelect.
 
 // ── Go ───────────────────────────────────────────────────────────────
 connect();
+stallWatchdog.init();
 </script>
