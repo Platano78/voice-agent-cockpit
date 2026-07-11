@@ -2226,26 +2226,45 @@ els.camBtn.addEventListener("click", () => { camStream ? stopCamera() : startCam
 // ── Screen vision: stream frames to the server so the `look` tool can see the user's
 // screen. OFF by default; mirrors the camera path above (same cadence, same text-control-
 // frame convention the websocket streamer writes to /dev/shm for the `look` tool).
-let screenStream = null, screenVideo = null, screenCanvas = null, screenTimer = null;
+let screenStream = null, screenVideo = null, screenCanvas = null, screenTimer = null, screenStarting = false;
 const SCREEN_MAX_WIDTH = 1280, SCREEN_QUALITY = 0.8;
 
 async function startScreenShare() {
-  if (screenStream) return;
+  if (screenStream || screenStarting) return; // re-entrancy guard covers the in-flight picker too
+  screenStarting = true;
+  els.screenBtn.disabled = true;
+  els.screenBtn.textContent = "🖥️ Screen starting…";
+  let stream;
   try {
-    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-  } catch (e) { screenStream = null; log("screen share denied: " + e.message); return; }
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+  } catch (e) {
+    screenStarting = false;
+    els.screenBtn.disabled = false;
+    els.screenBtn.setAttribute("aria-pressed", "false");
+    els.screenBtn.textContent = "🖥️ Screen off";
+    log("screen share denied: " + e.message);
+    return;
+  }
+  els.screenBtn.disabled = false;
+  if (!screenStarting) { stream.getTracks().forEach((t) => t.stop()); return; } // toggled off while the picker was pending
+  screenStarting = false;
+  screenStream = stream;
   const screenTrack = screenStream.getVideoTracks()[0];
   if (screenTrack) screenTrack.addEventListener("ended", stopScreenShare); // browser's own "Stop sharing" UI
   screenVideo = document.createElement("video");
   screenVideo.playsInline = true; screenVideo.muted = true; screenVideo.srcObject = screenStream;
   try { await screenVideo.play(); } catch {}
+  if (!screenStream) return; // stopped during the play() await — don't start a leaked frame loop
   screenCanvas = document.createElement("canvas");
+  if (screenTimer) clearInterval(screenTimer);
   screenTimer = setInterval(sendScreenFrame, CAM_INTERVAL_MS);
   els.screenBtn.setAttribute("aria-pressed", "true");
   els.screenBtn.textContent = "🖥️ Screen on";
   log("screen share on");
 }
 function stopScreenShare() {
+  screenStarting = false;
+  els.screenBtn.disabled = false;
   if (screenTimer) { clearInterval(screenTimer); screenTimer = null; }
   if (screenStream) { screenStream.getTracks().forEach((t) => t.stop()); screenStream = null; }
   screenVideo = null; screenCanvas = null;
@@ -2263,7 +2282,11 @@ function sendScreenFrame() {
   const b64 = screenCanvas.toDataURL("image/jpeg", SCREEN_QUALITY).split(",")[1];
   if (b64) ws.send(JSON.stringify({ type: "screen_frame", data: b64 }));
 }
-els.screenBtn.addEventListener("click", () => { screenStream ? stopScreenShare() : startScreenShare(); });
+els.screenBtn.addEventListener("click", () => {
+  if (screenStream) { stopScreenShare(); return; }
+  if (screenStarting) return; // getDisplayMedia already pending — no-op, never a second parallel request
+  startScreenShare();
+});
 
 const MOOD_VALUES = ["neutral", "happy", "excited", "thinking", "concerned", "playful", "serious"];
 
