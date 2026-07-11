@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Optional
@@ -287,7 +288,15 @@ def _load_dropin_tools() -> list[dict]:
         try:
             spec = importlib.util.spec_from_file_location(f"voice_dropin_{path.stem}", str(path))
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            # Register before exec per the importlib recipe — dataclasses (and
+            # anything else that looks itself up via sys.modules[__module__])
+            # crashes on 3.10 if the module isn't registered.
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(spec.name, None)
+                raise
         except Exception as e:
             logger.warning("voice_tools: drop-in %s failed to load: %r", path, e)
             continue
