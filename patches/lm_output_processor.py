@@ -22,6 +22,7 @@ from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
 from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk, TokenUsage, TTSInput
 from speech_to_speech.pipeline.queue_types import TextEventItem, TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.turn_stats import turn_stats
 from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         speech_stopped_at_s=None,
                     )
                 )
+                turn_stats.note_followup_pending()
             except Exception:
                 logger.exception("LMOutputProcessor: failed to enqueue follow-up generation")
 
@@ -140,6 +142,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     lm_output.turn_revision,
                 )
                 return
+            turn_stats.end_of_response()
             # A failed generation (e.g. invalid out-of-band input) closes the response as
             # "failed" via the text side-channel, then falls through to emit the normal
             # EndOfResponse so the audio path still re-enables listening / releases the slot.
@@ -169,6 +172,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             logger.debug("Dropping stale LLM chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision)
             return
 
+        turn_stats.on_llm_chunk(lm_output.speech_stopped_at_s)
+
         logger.debug(f"LM processor: text='{lm_output.text}', tools={lm_output.tools}")
 
         if self.text_output_queue is not None:
@@ -191,6 +196,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             # tool calls in the same chunk still get it.
             all_visual = all(t.name in voice_tools.VISUAL_TOOLS for t in lm_output.tools)
             if not all_visual and response_wants_audio(lm_output.response):
+                turn_stats.on_tts_input()
                 yield TTSInput(
                     text="Let me check.",
                     language_code=lm_output.language_code,
@@ -205,6 +211,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
 
         if lm_output.text and response_wants_audio(lm_output.response):
             logger.debug(f"Forwarding to TTS: '{lm_output.text}'")
+            turn_stats.on_tts_input()
             yield TTSInput(
                 text=lm_output.text,
                 language_code=lm_output.language_code,

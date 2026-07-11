@@ -15,6 +15,7 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
+from speech_to_speech.turn_stats import turn_stats
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,7 @@ class WebSocketStreamer:
                         if audio_buffer and self.clients:
                             data = bytes(audio_buffer)
                             audio_buffer.clear()
+                            turn_stats.mark("first_audio_out")
                             await asyncio.gather(
                                 *[client.send(data) for client in self.clients],
                                 return_exceptions=True,
@@ -253,6 +255,7 @@ class WebSocketStreamer:
                             data = bytes(audio_buffer)
                             audio_buffer.clear()
                             logger.debug(f"Sending {len(data)} bytes of audio to {len(self.clients)} client(s)")
+                            turn_stats.mark("first_audio_out")
                             await asyncio.gather(
                                 *[client.send(data) for client in self.clients], return_exceptions=True
                             )
@@ -262,6 +265,7 @@ class WebSocketStreamer:
                         data = bytes(audio_buffer)
                         audio_buffer.clear()
                         logger.debug(f"Flushing {len(data)} bytes of audio to {len(self.clients)} client(s)")
+                        turn_stats.mark("first_audio_out")
                         await asyncio.gather(*[client.send(data) for client in self.clients], return_exceptions=True)
 
                 # Check for text/tool messages
