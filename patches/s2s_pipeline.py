@@ -413,10 +413,29 @@ def _build_pipeline_handlers(
         parakeet_tdt_stt_handler_kwargs,
     )
 
+    # Pre-LLM reflex lane (Slice 2). Default OFF: only inserted when VOICE_REFLEX=1,
+    # so a plain restart is behaviourally identical to the un-gated chain. When on,
+    # ReflexGate consumes text_prompt_queue (the LM's former input) and forwards
+    # normal turns to a fresh queue the LM now reads; reflex-resolved turns are
+    # answered by injecting onto lm_response_queue and never reach the LM.
+    reflex_gate: Any | None = None
+    lm_input_queue: Queue[TextPromptItem] = text_prompt_queue
+    if os.environ.get("VOICE_REFLEX") == "1":
+        from speech_to_speech.reflex_lane import ReflexGate
+
+        reflex_to_lm_queue: Queue[TextPromptItem] = Queue()
+        reflex_gate = ReflexGate(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=reflex_to_lm_queue,
+            setup_kwargs={"lm_response_queue": lm_response_queue},
+        )
+        lm_input_queue = reflex_to_lm_queue
+
     lm = get_llm_handler(
         module_kwargs,
         stop_event,
-        text_prompt_queue,
+        lm_input_queue,
         lm_response_queue,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
@@ -446,7 +465,10 @@ def _build_pipeline_handlers(
         qwen3_tts_handler_kwargs,
     )
 
-    return [vad, stt, transcription_notifier, lm, lm_processor, tts]
+    handlers: list[Any] = [vad, stt, transcription_notifier, lm, lm_processor, tts]
+    if reflex_gate is not None:
+        handlers.insert(3, reflex_gate)  # between transcription_notifier and lm
+    return handlers
 
 
 def _build_realtime_pipeline_unit(
