@@ -2186,24 +2186,43 @@ function connect() {
 // ── Camera vision: stream frames to the server so the `look` tool can see. ──
 // OFF by default (privacy). Frames are sent ONLY while the toggle is on, as text
 // control frames the websocket streamer writes to /dev/shm for the `look` tool.
-let camStream = null, camVideo = null, camCanvas = null, camTimer = null;
+let camStream = null, camVideo = null, camCanvas = null, camTimer = null, camStarting = false;
 const CAM_INTERVAL_MS = 1500, CAM_EDGE = 512, CAM_QUALITY = 0.8;
 
 async function startCamera() {
-  if (camStream) return;
+  if (camStream || camStarting) return; // re-entrancy guard covers the in-flight permission prompt too
+  camStarting = true;
+  els.camBtn.disabled = true;
+  els.camBtn.textContent = "📷 Camera starting…";
+  let stream;
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, facingMode: "environment" } });
-  } catch (e) { camStream = null; log("camera denied: " + e.message); return; }
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, facingMode: "environment" } });
+  } catch (e) {
+    camStarting = false;
+    els.camBtn.disabled = false;
+    els.camBtn.setAttribute("aria-pressed", "false");
+    els.camBtn.textContent = "📷 Camera off";
+    log("camera denied: " + e.message);
+    return;
+  }
+  els.camBtn.disabled = false;
+  if (!camStarting) { stream.getTracks().forEach((t) => t.stop()); return; } // toggled off while the prompt was pending
+  camStarting = false;
+  camStream = stream;
   camVideo = document.createElement("video");
   camVideo.playsInline = true; camVideo.muted = true; camVideo.srcObject = camStream;
   try { await camVideo.play(); } catch {}
+  if (!camStream) return; // stopped during the play() await — don't start a leaked frame loop
   camCanvas = document.createElement("canvas");
+  if (camTimer) clearInterval(camTimer);
   camTimer = setInterval(sendCameraFrame, CAM_INTERVAL_MS);
   els.camBtn.setAttribute("aria-pressed", "true");
   els.camBtn.textContent = "📷 Camera on";
   log("camera on");
 }
 function stopCamera() {
+  camStarting = false;
+  els.camBtn.disabled = false;
   if (camTimer) { clearInterval(camTimer); camTimer = null; }
   if (camStream) { camStream.getTracks().forEach((t) => t.stop()); camStream = null; }
   camVideo = null; camCanvas = null;
@@ -2221,7 +2240,11 @@ function sendCameraFrame() {
   const b64 = camCanvas.toDataURL("image/jpeg", CAM_QUALITY).split(",")[1];
   if (b64) ws.send(JSON.stringify({ type: "camera_frame", data: b64 }));
 }
-els.camBtn.addEventListener("click", () => { camStream ? stopCamera() : startCamera(); });
+els.camBtn.addEventListener("click", () => {
+  if (camStream) { stopCamera(); return; }
+  if (camStarting) return; // getUserMedia already pending — no-op, never a second parallel request
+  startCamera();
+});
 
 // ── Screen vision: stream frames to the server so the `look` tool can see the user's
 // screen. OFF by default; mirrors the camera path above (same cadence, same text-control-
