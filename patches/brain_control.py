@@ -30,6 +30,7 @@ class BrainControl:
         brains_path: str,
         tts_handler: Any = None,
         cockpit: Any = None,
+        streamer: Any = None,
     ) -> None:
         self.llm_handler = llm_handler
         self.runtime_config = runtime_config
@@ -38,6 +39,11 @@ class BrainControl:
         self.active_brain = "coder"
         self.tts_handler = tts_handler
         self.cockpit = cockpit
+        # WebSocketStreamer, for wake-word control (gate lives on it) and
+        # broadcasting wakeword_state after a config_set flips it. None keeps
+        # every pre-existing call site/test valid -- wake word control is
+        # simply unavailable then.
+        self.streamer = streamer
         # Captured at construction time, before any config_set — this IS the
         # args-class init_chat_prompt default. Empty persona restores this,
         # it never means "no system prompt".
@@ -137,6 +143,20 @@ class BrainControl:
             logger.exception("BrainControl.handle failed")
             return {"type": "config_ack", "ok": False, "error": str(e)}
 
+    def _wake_word_state(self) -> Optional[dict[str, Any]]:
+        """Wake-word block for `config_state`/`config_ack` -- None when there's
+        no streamer to control (wake word control unavailable)."""
+        if self.streamer is None:
+            return None
+        gate = self.streamer.wakeword_gate
+        return {
+            "enabled": gate.enabled,
+            "state": gate.state(),
+            "phrase": gate.phrase,
+            "model": gate._model_arg,
+            "models": gate.available_models(),
+        }
+
     def _config_state(self) -> dict[str, Any]:
         return {
             "type": "config_state",
@@ -146,6 +166,7 @@ class BrainControl:
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
             "voices": self._predefined_voices() if self.tts_handler else [],
             "tools_armed": self.tools_armed,
+            "wake_word": self._wake_word_state(),
             "brains": [
                 {
                     "name": name,
@@ -182,6 +203,23 @@ class BrainControl:
                 if new_instructions != self.runtime_config.session.instructions:
                     self.runtime_config.session.instructions = new_instructions
                     chat_reset = True
+            if "wake_word" in msg:
+                if self.streamer is None:
+                    return {"type": "config_ack", "ok": False, "error": "wake word control unavailable"}
+                gate = self.streamer.wakeword_gate
+                if msg["wake_word"]:
+                    gate.enabled = True
+                    gate.rearm()
+                else:
+                    gate.enabled = False
+                self.streamer.broadcast_wakeword_state()
+            if "wake_word_model" in msg:
+                if self.streamer is None:
+                    return {"type": "config_ack", "ok": False, "error": "wake word control unavailable"}
+                ok, error = self.streamer.wakeword_gate.set_model(msg["wake_word_model"])
+                if not ok:
+                    return {"type": "config_ack", "ok": False, "error": error}
+                self.streamer.broadcast_wakeword_state()
             if msg.get("reset_chat"):
                 chat_reset = True
             if chat_reset:
@@ -204,6 +242,7 @@ class BrainControl:
                 "persona": self.runtime_config.session.instructions or "",
                 "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
                 "tools_armed": self.tools_armed,
+                "wake_word": self._wake_word_state(),
                 "chat_reset": chat_reset,
             }
 

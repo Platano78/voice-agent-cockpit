@@ -813,7 +813,7 @@
     font: 13px/1.4 inherit;
     resize: vertical;
   }
-  #voiceSelect, #avatarSelect, #personaSelect {
+  #voiceSelect, #avatarSelect, #personaSelect, #wakeModelSelect {
     width: 100%;
     min-height: 44px;
     background: var(--bg);
@@ -1330,6 +1330,14 @@
   </div>
   <div class="label" id="voiceLabel" hidden>Voice</div>
   <select id="voiceSelect" hidden></select>
+  <div id="wakeWordBlock" hidden>
+    <div class="label">Wake word</div>
+    <div class="brainOption">
+      <input type="checkbox" id="wakeToggle">
+      <label for="wakeToggle">Listen only after wake phrase</label>
+    </div>
+    <select id="wakeModelSelect"></select>
+  </div>
   <button class="panelBtn primary" id="applyPersonaBtn">Apply</button>
   <button class="panelBtn" id="resetChatBtn">Reset chat</button>
   <button class="panelBtn" id="reloadToolsBtn">Reload tools</button>
@@ -1477,6 +1485,9 @@ const els = {
   personaDeleteBtn: document.getElementById("personaDeleteBtn"),
   voiceLabel: document.getElementById("voiceLabel"),
   voiceSelect: document.getElementById("voiceSelect"),
+  wakeWordBlock: document.getElementById("wakeWordBlock"),
+  wakeToggle: document.getElementById("wakeToggle"),
+  wakeModelSelect: document.getElementById("wakeModelSelect"),
   avatarSelect: document.getElementById("avatarSelect"),
   applyPersonaBtn: document.getElementById("applyPersonaBtn"),
   resetChatBtn: document.getElementById("resetChatBtn"),
@@ -2096,6 +2107,21 @@ function renderConfigState(ev) {
     });
   }
 
+  const wakeWord = ev.wake_word;
+  const hasWakeWord = !!wakeWord;
+  els.wakeWordBlock.hidden = !hasWakeWord;
+  if (hasWakeWord && document.activeElement !== els.wakeToggle && document.activeElement !== els.wakeModelSelect) {
+    els.wakeToggle.checked = !!wakeWord.enabled;
+    els.wakeModelSelect.innerHTML = "";
+    (wakeWord.models || []).forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name.replace(/_/g, " ");
+      opt.selected = name === wakeWord.model;
+      els.wakeModelSelect.appendChild(opt);
+    });
+  }
+
   updateSessionRail(ev, active);
 }
 
@@ -2120,6 +2146,16 @@ els.reloadToolsBtn.addEventListener("click", () => {
 els.voiceSelect.addEventListener("change", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", voice: els.voiceSelect.value }));
+  }
+});
+els.wakeToggle.addEventListener("change", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", wake_word: els.wakeToggle.checked }));
+  }
+});
+els.wakeModelSelect.addEventListener("change", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", wake_word_model: els.wakeModelSelect.value }));
   }
 });
 
@@ -2370,10 +2406,14 @@ function handleEvent(text) {
       if (ev.state === "asleep") {
         setStatus("connecting", `zzz — say "${ev.phrase || "the wake word"}" to wake`);
         log("wakeword: asleep" + (ev.phrase ? ` (say "${ev.phrase}")` : ""));
+        if (els.wakeToggle) els.wakeToggle.checked = true;
       } else if (ev.state === "awake") {
         setStatus("connected", "connected");
         log("wake word detected score=" + ev.score);
         playWakeChime();
+      } else if (ev.state === "off") {
+        setStatus("connected", "connected");
+        if (els.wakeToggle) els.wakeToggle.checked = false;
       }
       break;
     case "config_state":

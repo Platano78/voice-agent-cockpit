@@ -220,6 +220,28 @@ class WebSocketStreamer:
                 self.input_queue.put(SESSION_END)
                 self.wakeword_gate.reset()
 
+    def broadcast_wakeword_state(self) -> None:
+        """Push the current wake-word gate status to every connected client.
+        Thread-safe: safe to call from BrainControl's `asyncio.to_thread`
+        context (control messages are handled off the event loop). Best-effort
+        -- never raises, only debug-logs failures."""
+        try:
+            if self.loop is None:
+                return
+            payload = json.dumps(
+                {"type": "wakeword_state", "state": self.wakeword_gate.state(), "phrase": self.wakeword_gate.phrase}
+            )
+
+            async def _send_all() -> None:
+                await asyncio.gather(
+                    *[client.send(payload) for client in self.clients],
+                    return_exceptions=True,
+                )
+
+            asyncio.run_coroutine_threadsafe(_send_all(), self.loop)
+        except Exception:
+            logger.debug("broadcast_wakeword_state failed", exc_info=True)
+
     def _write_camera_frame(self, data: Any) -> None:
         """Write the latest client camera frame to the tmpfs path the `look` vision
         tool reads. Rate-limited + size-capped, atomic replace, never raises."""

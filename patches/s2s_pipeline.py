@@ -796,6 +796,7 @@ def build_pipeline(
                 os.environ.get("BRAINS_JSON", os.path.expanduser("~/speech-to-speech/brains.json")),
                 tts_handler=tts_handler,
                 cockpit=cockpit,
+                streamer=websocket_streamer_ref,
             ).handle
 
     return ThreadManager([*comms_handlers, *pipeline_handlers])

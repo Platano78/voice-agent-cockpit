@@ -131,6 +131,27 @@ kept as an instant rollback (see below).
   the webclient shows a `zzz — say "<phrase>" to wake` status while asleep
   and a status-bar flip + short two-tone chime on `wakeword_state: awake`.
 
+  Runtime control (settings panel, added after the initial deploy):
+  `VOICE_WAKE_WORD`/`VOICE_WAKE_WORD_MODEL` are boot defaults only — the
+  settings panel's "Wake word" block (checkbox + phrase dropdown, hidden
+  entirely when `config_state.wake_word` is `null`, i.e. no websocket
+  streamer wired) lets a session flip the gate on/off and pick a different
+  pretrained phrase without a restart. The checkbox sends
+  `config_set {wake_word: bool}`; `true` also calls `WakewordGate.rearm()`
+  so a previously fail-open detector gets one fresh load attempt. The
+  dropdown sends `config_set {wake_word_model: name}`, validated by
+  `WakewordGate.set_model()` against `available_models()` (or an existing
+  `.onnx`/`.tflite` path) before swapping and re-arming. Either change
+  broadcasts a fresh `wakeword_state` (now also emitted with `state: "off"`
+  when disabled) to every connected client, so a toggle from one device is
+  reflected on all of them. `WakewordGate.available_models()` lists
+  openWakeWord's `resources/models` directory (same layout on 0.4.x and
+  >=0.5), strips the `_vX.Y`/extension suffix, and excludes the non-wake-phrase
+  files (`melspectrogram`, `embedding_model`, `silero_vad`, `timer`,
+  `weather`) — this is the custom-model seam: drop a trained `.onnx` into
+  that directory and it auto-appears in the dropdown next time the panel
+  refreshes, no code change needed.
+
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
 - `$HOME/speech-to-speech/brains.json` — brain registry (label,

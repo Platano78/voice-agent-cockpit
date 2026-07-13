@@ -12,6 +12,10 @@ and skips cleanly when the dependency isn't installed.
 from __future__ import annotations
 
 import os
+import sys
+import threading
+import time
+import types
 
 import pytest
 
@@ -204,6 +208,211 @@ def test_phrase_from_custom_path(monkeypatch):
     monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", "/opt/models/my_word_v1.2.onnx")
     gate = wg.WakewordGate()
     assert gate.phrase == "my word"
+
+
+# ── rearm() -- deliberate user re-arm (vs reset()'s auto re-arm) ─────────
+
+
+def test_rearm_after_loader_failure_retries_and_can_refail(monkeypatch):
+    gate = wg.WakewordGate()
+
+    def boom():
+        raise RuntimeError("no model file")
+
+    monkeypatch.setattr(gate, "_load_model", boom)
+    gate.feed(_silence(wg._FRAME_SAMPLES))  # fails open
+    assert gate.awake is True
+    assert gate._load_failed is True
+
+    gate.rearm()
+
+    assert gate._load_failed is False  # unlike reset(), rearm() clears the latch
+    assert gate.awake is False
+    assert len(gate._buffer) == 0
+
+    # A second consecutive failure fails open again -- one retry, not infinite.
+    gate.feed(_silence(wg._FRAME_SAMPLES))
+    assert gate.awake is True
+    assert gate._load_failed is True
+
+
+def test_rearm_after_loader_failure_retries_and_succeeds(monkeypatch):
+    gate = wg.WakewordGate()
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("no model file")
+        return FakeModel(score=0.0)
+
+    monkeypatch.setattr(gate, "_load_model", flaky)
+    gate.feed(_silence(wg._FRAME_SAMPLES))  # fails open on the first attempt
+    assert gate.awake is True
+
+    gate.rearm()
+    gate.feed(_silence(wg._FRAME_SAMPLES))  # retries the loader, succeeds this time
+
+    assert gate.awake is False
+    assert calls["n"] == 2
+
+
+# ── set_model() ────────────────────────────────────────────────────────
+
+
+def test_set_model_valid_name_swaps_and_rearms(monkeypatch):
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "alexa"])
+    fake = FakeModel(score=0.9)
+    monkeypatch.setattr(gate, "_load_model", lambda: fake)
+    gate.feed(_silence(wg._FRAME_SAMPLES))
+    assert gate.awake is True
+
+    ok, err = gate.set_model("alexa")
+
+    assert ok is True
+    assert err == ""
+    assert gate._model_arg == "alexa"
+    assert gate._model is None  # dropped -- lazy-reloads on the next feed()
+    assert gate.awake is False  # rearm() fired
+
+
+def test_set_model_garbage_name_rejected_and_unchanged(monkeypatch):
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis"])
+    original_arg = gate._model_arg
+
+    ok, err = gate.set_model("totally_not_a_model")
+
+    assert ok is False
+    assert err
+    assert gate._model_arg == original_arg
+
+
+# ── available_models() ────────────────────────────────────────────────
+
+
+def _fake_openwakeword_module(tmp_path):
+    """Minimal fake `openwakeword` module (just a `__file__`) so
+    available_models() resolves a models dir under `tmp_path` without
+    requiring the real dependency to be installed."""
+    pkg_dir = tmp_path / "openwakeword"
+    pkg_dir.mkdir()
+    fake_mod = types.ModuleType("openwakeword")
+    fake_mod.__file__ = str(pkg_dir / "__init__.py")
+    return fake_mod
+
+
+def test_available_models_excludes_non_wake_files_and_includes_current(monkeypatch, tmp_path):
+    gate = wg.WakewordGate()
+    monkeypatch.setitem(sys.modules, "openwakeword", _fake_openwakeword_module(tmp_path))
+    monkeypatch.setattr(
+        wg.os,
+        "listdir",
+        lambda d: [
+            "hey_jarvis_v0.1.onnx",
+            "alexa_v0.1.onnx",
+            "melspectrogram.onnx",
+            "embedding_model.onnx",
+            "silero_vad.onnx",
+            "timer_v0.1.onnx",
+            "weather_v0.1.onnx",
+        ],
+    )
+
+    models = gate.available_models()
+
+    assert models == ["alexa", "hey_jarvis"]  # sorted; non-wake-phrase files excluded
+
+
+def test_available_models_always_includes_current_even_if_absent(monkeypatch, tmp_path):
+    gate = wg.WakewordGate()
+    monkeypatch.setitem(sys.modules, "openwakeword", _fake_openwakeword_module(tmp_path))
+    monkeypatch.setattr(wg.os, "listdir", lambda d: ["alexa_v0.1.onnx"])
+
+    models = gate.available_models()
+
+    assert "hey_jarvis" in models  # default VOICE_WAKE_WORD_MODEL, not on disk here
+    assert "alexa" in models
+
+
+def test_available_models_falls_back_to_current_on_any_exception(monkeypatch, tmp_path):
+    gate = wg.WakewordGate()
+    monkeypatch.setitem(sys.modules, "openwakeword", _fake_openwakeword_module(tmp_path))
+
+    def boom(_d):
+        raise OSError("models dir vanished")
+
+    monkeypatch.setattr(wg.os, "listdir", boom)
+
+    models = gate.available_models()
+
+    assert models == [gate._strip_model_suffix(gate._model_arg)]
+
+
+# ── state() ────────────────────────────────────────────────────────────
+
+
+def test_state_off_when_disabled(monkeypatch):
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    gate = wg.WakewordGate()
+    assert gate.state() == "off"
+
+
+def test_state_asleep_when_enabled_not_awake(monkeypatch):
+    monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    gate = wg.WakewordGate()
+    assert gate.state() == "asleep"
+
+
+def test_state_awake_when_enabled_and_awake(monkeypatch):
+    monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    gate = wg.WakewordGate()
+    gate._awake = True
+    assert gate.state() == "awake"
+
+
+# ── _lock: feed() vs rearm()/set_model() from another thread ─────────────
+
+
+class SlowFakeModel(FakeModel):
+    """Same as FakeModel, but predict() sleeps briefly so the feeder thread
+    holds `_lock` long enough for the control thread to contend on it."""
+
+    def predict(self, frame):
+        time.sleep(0.001)
+        return super().predict(frame)
+
+
+def test_feed_concurrent_with_rearm_never_raises(monkeypatch):
+    monkeypatch.setenv("VOICE_WAKE_WORD_THRESHOLD", "0.9")  # noise never crosses it
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis"])
+    monkeypatch.setattr(gate, "_load_model", lambda: SlowFakeModel(score=0.1))
+
+    errors: list[BaseException] = []
+
+    def feeder():
+        try:
+            for _ in range(200):
+                gate.feed(_silence(wg._FRAME_SAMPLES))
+        except BaseException as exc:  # noqa: BLE001 - must observe any exception from the thread
+            errors.append(exc)
+
+    feeder_thread = threading.Thread(target=feeder)
+    feeder_thread.start()
+    for i in range(50):
+        if i % 2 == 0:
+            gate.rearm()
+        else:
+            gate.set_model("hey_jarvis")
+    feeder_thread.join(timeout=10)
+
+    assert not feeder_thread.is_alive()
+    assert errors == []
+    assert gate.awake in (True, False)
+    gate.rearm()  # deterministic final state regardless of interleaving
+    assert len(gate._buffer) < wg._FRAME_BYTES
 
 
 # ── real openwakeword smoke test (skips without the dependency) ─────────

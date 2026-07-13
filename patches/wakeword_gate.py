@@ -23,6 +23,12 @@ Design:
   internal buffer and only scores complete 1280-sample (80ms) frames --
   WebSocket frames arrive as multiples of 512 samples, not 1280, so a
   remainder must survive across calls.
+* **Cross-thread safe.** ``feed()`` runs on the audio-loop thread while
+  ``rearm()``/``set_model()``/``reset()`` can run on a control-message
+  thread (``BrainControl.handle`` via ``asyncio.to_thread``) or on
+  streamer-disconnect. All four share ``_lock`` around their mutable-state
+  bodies; ``state()``, ``phrase``, ``available_models()``, and the
+  ``awake``/``enabled`` reads stay lock-free (plain attribute reads, GIL-atomic).
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from typing import Any
 
 import numpy as np
@@ -41,6 +48,12 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _FRAME_SAMPLES = 1280  # 80ms @ 16kHz, openWakeWord's native hop size
 _FRAME_BYTES = _FRAME_SAMPLES * 2  # int16 mono
 _SCORE_LOG_FLOOR = 0.05  # calibration affordance: log anything above the noise floor
+
+# openWakeWord ships non-wake-phrase files (feature extractors, VAD, timer/weather
+# demo models) alongside the pretrained wake-phrase models in the same directory --
+# these are never valid `VOICE_WAKE_WORD_MODEL` choices, so available_models() drops
+# them from the settings-panel dropdown.
+_NON_WAKE_MODEL_NAMES = {"melspectrogram", "embedding_model", "silero_vad", "timer", "weather"}
 
 
 class WakewordGate:
@@ -56,6 +69,11 @@ class WakewordGate:
         self._model: Any = None
         self._load_failed = False
         self._buffer = bytearray()
+        # Guards _buffer/_model/_load_failed/_awake mutation across feed()
+        # (audio-loop thread) vs rearm()/set_model()/reset() (control-message
+        # thread). Plain Lock, not RLock -- set_model() calls the unlocked
+        # _rearm_locked() helper instead of re-entering rearm() to avoid needing one.
+        self._lock = threading.Lock()
 
     @property
     def awake(self) -> bool:
@@ -65,59 +83,145 @@ class WakewordGate:
     def phrase(self) -> str:
         """Human-readable wake phrase derived from the model name/path, e.g.
         ``"hey_jarvis"`` -> ``"hey jarvis"``."""
-        base = os.path.basename(self._model_arg)
+        return self._strip_model_suffix(self._model_arg).replace("_", " ")
+
+    @staticmethod
+    def _strip_model_suffix(name_or_path: str) -> str:
+        """``"/opt/models/hey_jarvis_v0.1.onnx"`` -> ``"hey_jarvis"``: drop the
+        directory, the ``.onnx``/``.tflite`` extension, and a pretrained
+        model's ``_vX.Y`` version suffix. Shared by :attr:`phrase` and
+        :meth:`available_models`."""
+        base = os.path.basename(name_or_path)
         base = re.sub(r"\.(onnx|tflite)$", "", base)
-        base = re.sub(r"_v[\d.]+$", "", base)  # strip a pretrained model's version suffix
-        return base.replace("_", " ")
+        base = re.sub(r"_v[\d.]+$", "", base)
+        return base
+
+    def state(self) -> str:
+        """Coarse status for the settings panel: ``"off"`` (not enabled),
+        ``"awake"``, or ``"asleep"``."""
+        if not self.enabled:
+            return "off"
+        return "awake" if self._awake else "asleep"
+
+    def rearm(self) -> None:
+        """Deliberate user re-arm -- toggling wake word on, or picking a new
+        model -- as opposed to :meth:`reset`'s automatic per-session re-arm.
+
+        Clears the buffer, goes back to sleep, AND gives a previously-broken
+        scorer one fresh load attempt: unlike :meth:`reset`, which
+        deliberately preserves ``_load_failed`` so a detector that already
+        proved unusable doesn't go deaf again on the next session,
+        ``rearm()`` resets that latch because the user just took an explicit
+        action implying they want detection to actually run again. If the
+        retry fails again, the gate fails open again on the very next
+        :meth:`feed`."""
+        with self._lock:
+            self._rearm_locked()
+
+    def _rearm_locked(self) -> None:
+        """Body of :meth:`rearm`, callable while ``self._lock`` is already
+        held (by :meth:`set_model`) so callers never re-enter the lock."""
+        self._buffer.clear()
+        self._load_failed = False
+        self._awake = False
+
+    def set_model(self, name_or_path: str) -> tuple[bool, str]:
+        """Swap the configured wake-phrase model. ``name_or_path`` must be
+        either one of :meth:`available_models` or an existing ``.onnx``/
+        ``.tflite`` path on disk (the custom-model seam). On success, drops
+        the loaded model (so the new one lazy-loads on the next
+        :meth:`feed`) and calls :meth:`rearm`. Returns ``(ok, error)`` like
+        ``BrainControl._set_brain``."""
+        if not isinstance(name_or_path, str) or not name_or_path.strip():
+            return False, "wake word model name required"
+        name_or_path = name_or_path.strip()
+        is_known = name_or_path in self.available_models()
+        is_custom_path = name_or_path.endswith((".onnx", ".tflite")) and os.path.isfile(name_or_path)
+        if not (is_known or is_custom_path):
+            return False, f"unknown wake word model: {name_or_path}"
+
+        with self._lock:
+            self._model_arg = name_or_path
+            self._model = None
+            self._rearm_locked()
+        return True, ""
+
+    def available_models(self) -> list[str]:
+        """Enumerate wake-phrase model files in openWakeWord's models
+        directory -- the seam a custom-trained ``.onnx`` dropped in there
+        uses to auto-appear in the settings-panel dropdown. Excludes
+        non-wake-phrase files (feature extractors, VAD, timer/weather demo
+        models). Always includes the currently configured model, even if it
+        isn't found on disk (e.g. a custom path). Sorted; on any failure
+        (``openwakeword`` not installed, directory missing, ...) falls back
+        to just the current model."""
+        current = self._strip_model_suffix(self._model_arg)
+        try:
+            import openwakeword
+
+            models_dir = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+            names = {current}
+            for fname in os.listdir(models_dir):
+                if not fname.endswith((".onnx", ".tflite")):
+                    continue
+                name = self._strip_model_suffix(fname)
+                if name in _NON_WAKE_MODEL_NAMES:
+                    continue
+                names.add(name)
+            return sorted(names)
+        except Exception:
+            return [current]
 
     def reset(self) -> None:
         """Re-arm for a new session: clear the buffer, go back to sleep, but
         keep the loaded model (and its own streaming state, if any)."""
-        self._buffer.clear()
-        # A broken detector must stay failed-open across sessions too -- don't
-        # let a new session go deaf again on a model that already proved unusable.
-        self._awake = self._load_failed
-        if self._model is not None:
-            reset_fn = getattr(self._model, "reset", None)
-            if callable(reset_fn):
-                try:
-                    reset_fn()
-                except Exception:
-                    logger.debug("wakeword model reset() failed", exc_info=True)
+        with self._lock:
+            self._buffer.clear()
+            # A broken detector must stay failed-open across sessions too -- don't
+            # let a new session go deaf again on a model that already proved unusable.
+            self._awake = self._load_failed
+            if self._model is not None:
+                reset_fn = getattr(self._model, "reset", None)
+                if callable(reset_fn):
+                    try:
+                        reset_fn()
+                    except Exception:
+                        logger.debug("wakeword model reset() failed", exc_info=True)
 
     def feed(self, data: bytes) -> float | None:
         """Feed raw int16 PCM bytes; score every complete 1280-sample frame
         accumulated across this and prior calls. Returns the max score seen
         in this call, or ``None`` if no complete frame was consumed."""
-        if not self._ensure_model():
-            return None
+        with self._lock:
+            if not self._ensure_model():
+                return None
 
-        self._buffer.extend(data)
-        max_score: float | None = None
-        while len(self._buffer) >= _FRAME_BYTES:
-            frame_bytes = bytes(self._buffer[:_FRAME_BYTES])
-            del self._buffer[:_FRAME_BYTES]
-            frame = np.frombuffer(frame_bytes, dtype=np.int16)
+            self._buffer.extend(data)
+            max_score: float | None = None
+            while len(self._buffer) >= _FRAME_BYTES:
+                frame_bytes = bytes(self._buffer[:_FRAME_BYTES])
+                del self._buffer[:_FRAME_BYTES]
+                frame = np.frombuffer(frame_bytes, dtype=np.int16)
 
-            try:
-                predictions = self._model.predict(frame)
-            except Exception:
-                logger.exception("wakeword predict failed; failing open for the rest of the session")
-                self._model = None
-                self._load_failed = True
-                self._awake = True
-                return max_score
+                try:
+                    predictions = self._model.predict(frame)
+                except Exception:
+                    logger.exception("wakeword predict failed; failing open for the rest of the session")
+                    self._model = None
+                    self._load_failed = True
+                    self._awake = True
+                    return max_score
 
-            score = float(max(predictions.values())) if predictions else 0.0
-            if max_score is None or score > max_score:
-                max_score = score
-            if score > _SCORE_LOG_FLOOR:
-                logger.debug("wake word score: %.3f", score)
-            if not self._awake and score >= self.threshold:
-                self._awake = True
-                logger.info("wake word %r detected (score=%.3f)", self.phrase, score)
+                score = float(max(predictions.values())) if predictions else 0.0
+                if max_score is None or score > max_score:
+                    max_score = score
+                if score > _SCORE_LOG_FLOOR:
+                    logger.debug("wake word score: %.3f", score)
+                if not self._awake and score >= self.threshold:
+                    self._awake = True
+                    logger.info("wake word %r detected (score=%.3f)", self.phrase, score)
 
-        return max_score
+            return max_score
 
     def _ensure_model(self) -> bool:
         """Lazily load the openWakeWord model. Returns False (and fails
