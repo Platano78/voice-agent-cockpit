@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import random
 from collections.abc import Iterator
 from queue import Queue
 
@@ -26,6 +28,54 @@ from speech_to_speech.turn_stats import turn_stats
 from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
+
+# Tool-call filler phrases: a "let me check" alone gets stale on repeat tool
+# calls, so we rotate over a pool instead of a single hardcoded string.
+_DEFAULT_TOOL_FILLERS: tuple[str, ...] = (
+    "Let me check.",
+    "One sec.",
+    "Checking.",
+    "On it.",
+    "Let me look.",
+    "Give me a moment.",
+    "Looking that up.",
+)
+
+
+def _parse_tool_fillers() -> tuple[str, ...]:
+    """Parse VOICE_TOOL_FILLERS (pipe-separated, since phrases may contain
+    commas). Unset or blank-after-parsing falls back to the default pool.
+    The special value "off" (case-insensitive, exact) disables the filler
+    entirely by returning an empty pool.
+    """
+    raw = os.environ.get("VOICE_TOOL_FILLERS")
+    if raw is None:
+        return _DEFAULT_TOOL_FILLERS
+    if raw.strip().lower() == "off":
+        return ()
+    phrases = tuple(phrase.strip() for phrase in raw.split("|") if phrase.strip())
+    return phrases if phrases else _DEFAULT_TOOL_FILLERS
+
+
+_TOOL_FILLERS: tuple[str, ...] = _parse_tool_fillers()
+_last_tool_filler: str | None = None
+
+
+def _pick_filler() -> str | None:
+    """Pick a tool-call filler phrase, or None if fillers are disabled.
+
+    Avoids repeating the last-returned phrase back-to-back when the pool
+    has more than one entry.
+    """
+    global _last_tool_filler
+    if not _TOOL_FILLERS:
+        return None
+    phrase = random.choice(_TOOL_FILLERS)
+    if len(_TOOL_FILLERS) > 1:
+        while phrase == _last_tool_filler:
+            phrase = random.choice(_TOOL_FILLERS)
+    _last_tool_filler = phrase
+    return phrase
 
 
 class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
@@ -196,17 +246,19 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             # tool calls in the same chunk still get it.
             all_visual = all(t.name in voice_tools.VISUAL_TOOLS for t in lm_output.tools)
             if not all_visual and response_wants_audio(lm_output.response):
-                turn_stats.on_tts_input()
-                yield TTSInput(
-                    text="Let me check.",
-                    language_code=lm_output.language_code,
-                    runtime_config=lm_output.runtime_config,
-                    response=lm_output.response,
-                    turn_id=lm_output.turn_id,
-                    turn_revision=lm_output.turn_revision,
-                    speech_stopped_at_s=lm_output.speech_stopped_at_s,
-                    cancel_generation=lm_output.cancel_generation,
-                )
+                filler = _pick_filler()
+                if filler is not None:
+                    turn_stats.on_tts_input()
+                    yield TTSInput(
+                        text=filler,
+                        language_code=lm_output.language_code,
+                        runtime_config=lm_output.runtime_config,
+                        response=lm_output.response,
+                        turn_id=lm_output.turn_id,
+                        turn_revision=lm_output.turn_revision,
+                        speech_stopped_at_s=lm_output.speech_stopped_at_s,
+                        cancel_generation=lm_output.cancel_generation,
+                    )
             self._run_tool_calls(lm_output)
 
         if lm_output.text and response_wants_audio(lm_output.response):

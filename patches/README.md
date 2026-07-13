@@ -98,9 +98,14 @@ kept as an instant rollback (see below).
   `transformers`/`mlx-lm` backend class hierarchy and is never invoked here,
   so there is no double-channel risk to guard against. Because a tool-call
   turn's `content` is empty on the native channel, `process()` also yields a
-  short "Let me check." `TTSInput` filler (only when `response_wants_audio`)
-  immediately before `_run_tool_calls` blocks the thread on the executor —
-  otherwise the user hears silence for the tool's timeout budget.
+  short filler `TTSInput` (only when `response_wants_audio`) immediately
+  before `_run_tool_calls` blocks the thread on the executor — otherwise the
+  user hears silence for the tool's timeout budget. The filler is picked
+  from a rotating pool (`_pick_filler`, default seven phrases such as "Let
+  me check." and "One sec.") that avoids repeating the previous phrase
+  back-to-back; the pool is overridable via the `VOICE_TOOL_FILLERS` env var
+  (pipe-`|`-separated phrases, since a phrase may itself contain a comma),
+  and the special value `off` disables the filler entirely.
 
 - `wakeword_gate.py` (new) — `speech_to_speech/wakeword_gate.py`. Defines
   `WakewordGate`, an optional join-deaf gate (borrowed from
