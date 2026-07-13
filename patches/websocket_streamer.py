@@ -16,6 +16,7 @@ from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 from speech_to_speech.turn_stats import turn_stats
+from speech_to_speech.wakeword_gate import WakewordGate
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class WebSocketStreamer:
         self.server: Any = None
         self._last_cam_write = 0.0
         self._last_screen_write = 0.0
+        self.wakeword_gate = WakewordGate()
 
     def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
@@ -138,11 +140,40 @@ class WebSocketStreamer:
             self.should_listen.set()
             logger.debug("Listening enabled, edge queues drained (should_listen.set())")
 
+            if self.wakeword_gate.enabled and not self.wakeword_gate.awake:
+                try:
+                    await websocket.send(
+                        json.dumps({"type": "wakeword_state", "state": "asleep", "phrase": self.wakeword_gate.phrase})
+                    )
+                except Exception:
+                    logger.debug("Client %s: wakeword asleep notice failed", client_id, exc_info=True)
+
         try:
             logger.debug(f"Client {client_id}: Starting message receive loop")
             async for message in websocket:
                 if isinstance(message, bytes):
                     logger.debug(f"Client {client_id}: Received {len(message)} bytes of audio")
+
+                    # Wakeword join-deaf gate (ShayneP-borrow): while enabled and not yet
+                    # awake, audio is scored for the wake phrase and never reaches
+                    # input_queue/VAD. Detection typically fires mid-utterance (e.g. "hey
+                    # jarvis, what's the weather") -- the remainder of that same breath
+                    # flows through the normal should_listen path below on the very next
+                    # binary frame, so one-breath wake+command works.
+                    if self.wakeword_gate.enabled and not self.wakeword_gate.awake:
+                        was_awake = self.wakeword_gate.awake
+                        score = await asyncio.to_thread(self.wakeword_gate.feed, message)
+                        if self.wakeword_gate.awake and not was_awake:
+                            logger.info(f"Client {client_id}: wake word detected (score={score})")
+                            await asyncio.gather(
+                                *[
+                                    client.send(json.dumps({"type": "wakeword_state", "state": "awake", "score": score}))
+                                    for client in self.clients
+                                ],
+                                return_exceptions=True,
+                            )
+                        continue
+
                     if self.should_listen.is_set():
                         # Split into 512-sample (1024 bytes) chunks for VAD.
                         # Keep a per-client remainder buffer so no samples are dropped
@@ -187,6 +218,7 @@ class WebSocketStreamer:
             if len(self.clients) == 0:
                 logger.debug("Last WebSocket client disconnected, ending session")
                 self.input_queue.put(SESSION_END)
+                self.wakeword_gate.reset()
 
     def _write_camera_frame(self, data: Any) -> None:
         """Write the latest client camera frame to the tmpfs path the `look` vision

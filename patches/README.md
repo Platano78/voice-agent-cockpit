@@ -102,6 +102,35 @@ kept as an instant rollback (see below).
   immediately before `_run_tool_calls` blocks the thread on the executor —
   otherwise the user hears silence for the tool's timeout budget.
 
+- `wakeword_gate.py` (new) — `speech_to_speech/wakeword_gate.py`. Defines
+  `WakewordGate`, an optional join-deaf gate (borrowed from
+  `ShayneP/local-voice-ai`, see
+  `knowledge-base/research-notes/shaynep-local-voice-ai-2026-07-12.md`).
+  Env-driven, off by default: `VOICE_WAKE_WORD=1` (truthy: `1`/`true`/`yes`/`on`)
+  arms it; `VOICE_WAKE_WORD_MODEL` (default `hey_jarvis`, any openWakeWord
+  pretrained model name or a path to a custom `.onnx`) selects the model;
+  `VOICE_WAKE_WORD_THRESHOLD` (default `0.5`) sets the score gate. While
+  armed and not yet awake, `websocket_streamer.py`'s binary branch routes
+  mic audio through `WakewordGate.feed()` instead of `input_queue` — the
+  pipeline stays deaf until the wake phrase scores above threshold, then
+  wakes once for the rest of that session (`WakewordGate.reset()` re-arms it
+  on the next session, called next to the `SESSION_END` put on last-client
+  disconnect). Fail-open by design: any exception loading the model or
+  scoring a frame is logged once and treated as an immediate, permanent
+  wake — a broken detector must never brick the assistant. The module
+  itself never imports `openwakeword` at module scope (lazy import inside
+  `_load_model`), so it stays importable/testable with the dependency
+  absent.
+
+  Deploy prerequisite (only if `VOICE_WAKE_WORD=1` is actually used):
+  `pip install openwakeword onnxruntime` into `$INSTALL_DIR/.venv`, then
+  one-time model download:
+  `$INSTALL_DIR/.venv/bin/python3 -c "import openwakeword.utils; openwakeword.utils.download_models()"`
+  (openwakeword >=0.5 ships no models in the wheel; older 0.4.x bundles the
+  pretrained onnx models already and this step is a no-op). Client-side,
+  the webclient shows a `zzz — say "<phrase>" to wake` status while asleep
+  and a status-bar flip + short two-tone chime on `wakeword_state: awake`.
+
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
 - `$HOME/speech-to-speech/brains.json` — brain registry (label,

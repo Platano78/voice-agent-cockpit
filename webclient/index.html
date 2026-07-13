@@ -2366,6 +2366,16 @@ function handleEvent(text) {
     case "token_usage":
       log(`tokens in=${ev.input_tokens} out=${ev.output_tokens}`);
       break;
+    case "wakeword_state":
+      if (ev.state === "asleep") {
+        setStatus("connecting", `zzz — say "${ev.phrase || "the wake word"}" to wake`);
+        log("wakeword: asleep" + (ev.phrase ? ` (say "${ev.phrase}")` : ""));
+      } else if (ev.state === "awake") {
+        setStatus("connected", "connected");
+        log("wake word detected score=" + ev.score);
+        playWakeChime();
+      }
+      break;
     case "config_state":
       renderConfigState(ev);
       break;
@@ -2423,6 +2433,28 @@ function ensurePlayCtx() {
   }
   if (playCtx.state === "suspended") playCtx.resume();
   return playCtx;
+}
+
+// Short two-tone chime for wake-word detection ("wakeword_state": "awake").
+// Reuses the existing playback AudioContext when reachable; never breaks the
+// event handler on failure (e.g. autoplay policy before any user gesture).
+function playWakeChime() {
+  try {
+    const ctx = ensurePlayCtx();
+    const now = ctx.currentTime;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.15;
+    gain.connect(ctx.destination);
+    [660, 880].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      const start = now + i * 0.12;
+      osc.start(start);
+      osc.stop(start + 0.12);
+    });
+  } catch {}
 }
 
 function enqueuePlayback(arrayBuffer) {
