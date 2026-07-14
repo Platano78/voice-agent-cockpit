@@ -27,6 +27,10 @@ WorkingDirectory=${WORKING_DIR}
 ExecStart=${VENV_DIR}/bin/speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port ${WS_PORT} --stt ${STT_BACKEND} --parakeet_tdt_device cpu --tts ${TTS_BACKEND} --pocket_tts_voice ${TTS_VOICE} --pocket_tts_device cpu --llm_backend chat-completions --responses_api_base_url ${LLM_BASE_URL} --responses_api_api_key dummy --model_name ${LLM_MODEL_NAME} --responses_api_stream --speculative_reopen_ms=-1 --unanswered_reopen_ms=-1
 Restart=on-failure
 RestartSec=5
+# For remote (non-localhost) mic access over HTTPS, the browser needs wss:// too.
+# See patches/README.md "Remote access / HTTPS" for how to generate a cert.
+# Environment=VOICE_WS_CERTFILE=/path/to/cert.pem
+# Environment=VOICE_WS_KEYFILE=/path/to/key.pem
 
 [Install]
 WantedBy=multi-user.target

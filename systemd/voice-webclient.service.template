@@ -21,6 +21,9 @@ WorkingDirectory=${WEBCLIENT_DIR}
 ExecStart=/usr/bin/python3 ${WEBCLIENT_DIR}/serve.py --port ${HTTP_PORT}
 Restart=on-failure
 RestartSec=5
+# For HTTPS (required for mic access from non-localhost devices), add
+# --certfile /path/to/cert.pem --keyfile /path/to/key.pem to ExecStart above;
+# see patches/README.md "Remote access / HTTPS".
 
 [Install]
 WantedBy=multi-user.target

@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import ssl
 import time
 from queue import Empty, Queue
 from threading import Event
@@ -31,6 +32,16 @@ _CAMERA_MAX_BYTES = 2_000_000
 _SCREEN_FRAME_PATH = os.environ.get("VOICE_SCREEN_FRAME", "/dev/shm/voice_screen_frame.jpg")
 _SCREEN_MIN_INTERVAL_S = 1.0
 _SCREEN_MAX_BYTES = 2_000_000
+
+# HTTPS/wss support: when the webclient is served over TLS (required for getUserMedia
+# on non-localhost hosts), the browser dials wss:// for the audio socket too. Set both
+# cert env vars to also start a TLS listener alongside the plain one; see
+# patches/README.md "Remote access / HTTPS".
+_WSS_CERTFILE = os.environ.get("VOICE_WS_CERTFILE")
+_WSS_KEYFILE = os.environ.get("VOICE_WS_KEYFILE")
+# Kept as a raw string at module level and parsed inside _run_server's TLS try-block
+# so a typo'd port doesn't raise at import time -- same fail-soft rule as a bad cert.
+_WSS_PORT_RAW = os.environ.get("VOICE_WSS_PORT", "8443")
 
 
 class WebSocketStreamer:
@@ -64,6 +75,7 @@ class WebSocketStreamer:
         self.clients: set[ServerConnection] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any = None
+        self.tls_server: Any = None
         self._last_cam_write = 0.0
         self._last_screen_write = 0.0
         self.wakeword_gate = WakewordGate()
@@ -92,6 +104,22 @@ class WebSocketStreamer:
             self.port,
         )
 
+        if _WSS_CERTFILE and _WSS_KEYFILE:
+            try:
+                wss_port = int(_WSS_PORT_RAW)
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(_WSS_CERTFILE, _WSS_KEYFILE)
+                self.tls_server = await websockets.serve(
+                    self._handle_client,
+                    self.host,
+                    wss_port,
+                    ssl=ctx,
+                )
+                logger.info(f"WebSocket TLS listener on wss://{self.host}:{wss_port}")
+            except Exception as e:
+                logger.error(f"WebSocket TLS listener failed to start ({e}); continuing plain-only")
+                self.tls_server = None
+
         logger.info("WebSocket server ready, waiting for connections...")
 
         # Start the sender task
@@ -117,6 +145,9 @@ class WebSocketStreamer:
 
         self.server.close()
         await self.server.wait_closed()
+        if self.tls_server is not None:
+            self.tls_server.close()
+            await self.tls_server.wait_closed()
         logger.info("WebSocket server closed")
 
     async def _handle_client(self, websocket: ServerConnection) -> None:

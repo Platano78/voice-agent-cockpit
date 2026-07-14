@@ -205,6 +205,59 @@ kept as an instant rollback (see below).
   protocol change was needed for #8 — the ws control-message shape is
   identical on both backends.
 
+## Remote access / HTTPS (mic requires a secure context)
+
+Browsers only allow `getUserMedia` (microphone access) on a "secure context" —
+`https://` or `http://localhost`. Loading the cockpit over plain `http://` from
+another device on your LAN (by IP or hostname) will silently fail to get mic
+permission. Both halves of the stack — the static webclient and the pipeline's
+WebSocket — need to run over TLS to fix this.
+
+1. **Generate a certificate.** [mkcert](https://github.com/FiloSottile/mkcert)
+   is the easiest path and avoids browser warnings on any device that trusts
+   its local CA:
+
+   ```bash
+   mkcert -install
+   mkcert <lan-ip-or-hostname>   # e.g. mkcert 192.168.1.50
+   ```
+
+   This produces a `<name>.pem` (cert) and `<name>-key.pem` (key) in the
+   current directory. If you'd rather not install mkcert, a self-signed cert
+   with `openssl` works too (browsers will show a one-time warning to click
+   through, on each device):
+
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+     -keyout key.pem -out cert.pem -subj "/CN=<lan-ip-or-hostname>"
+   ```
+
+2. **Serve the webclient over HTTPS** using the cert pair:
+
+   ```bash
+   python3 webclient/serve.py --certfile cert.pem --keyfile key.pem
+   ```
+
+3. **Point the pipeline's WebSocket at the same cert pair** via env vars
+   before starting the `speech-to-speech` service:
+
+   ```bash
+   export VOICE_WS_CERTFILE=/path/to/cert.pem
+   export VOICE_WS_KEYFILE=/path/to/key.pem
+   # export VOICE_WSS_PORT=8443   # optional, this is the default
+   ```
+
+   When both are set, `websocket_streamer.py` starts a second, TLS-wrapped
+   listener on `VOICE_WSS_PORT` alongside the existing plain-`ws` listener
+   (which keeps running unchanged for `localhost`/http use) — the same cert
+   pair from step 1 works for both the webclient and the WebSocket. If the
+   cert fails to load, the service logs the error and continues serving
+   plain `ws` only; a bad cert never takes down the voice pipeline.
+
+4. **`localhost` needs none of this** — plain `http`/`ws` on `localhost` is
+   already a secure context, so the mic works there with no cert setup at
+   all.
+
 ## Re-applying
 
 ```bash
