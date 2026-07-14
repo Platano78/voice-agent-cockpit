@@ -2501,6 +2501,26 @@ const liveSources = new Set();
 // is purely an ADDITIONAL parallel connection, never a reroute.
 let avatarAudioTapNode = null;
 
+// Local playback tail, tracked across every source that hits the speaker (assistant
+// TTS, the stall-fill clips, and the wake chime) so open-mic mode knows when it's
+// safe to resume sending. See noteLocalPlayback()/assistantAudioActive() below —
+// this exists to stop the assistant's own voice from re-entering an always-hot mic.
+let localPlaybackTailTime = 0;
+// Margin past the last-scheduled sample end before open-mic sends resume: covers
+// speaker decay + room echo so the mic doesn't catch the reverberating tail.
+const PLAYBACK_TAIL_MARGIN_SEC = 0.35;
+function noteLocalPlayback(endTime) {
+  if (endTime > localPlaybackTailTime) localPlaybackTailTime = endTime; // never move the tail backward
+}
+// True while local speaker output is (or very recently was) live. Open-mic frames are
+// dropped during this window — a client-side half-duplex so the assistant can't hear
+// itself. Known trade-off: this also means open-mic can't voice-barge-in on a reply
+// (browser echo-cancellation over WebAudio output isn't reliable enough to lift it) —
+// interrupting a reply in open-mic requires the wake word to re-trigger, or a tap.
+function assistantAudioActive() {
+  return !!playCtx && playCtx.currentTime < localPlaybackTailTime + PLAYBACK_TAIL_MARGIN_SEC;
+}
+
 function updateSpeakingIndicator() {
   els.assistantCard.classList.toggle("speaking", liveSources.size > 0);
 }
@@ -2523,6 +2543,7 @@ function playWakeChime() {
     const gain = ctx.createGain();
     gain.gain.value = 0.15;
     gain.connect(ctx.destination);
+    let chimeEnd = now;
     [660, 880].forEach((freq, i) => {
       const osc = ctx.createOscillator();
       osc.type = "sine";
@@ -2531,7 +2552,9 @@ function playWakeChime() {
       const start = now + i * 0.12;
       osc.start(start);
       osc.stop(start + 0.12);
+      chimeEnd = start + 0.12;
     });
+    noteLocalPlayback(chimeEnd);
   } catch {}
 }
 
@@ -2555,6 +2578,7 @@ function enqueuePlayback(arrayBuffer) {
   if (nextStartTime < now) nextStartTime = now + 0.02; // small priming gap
   src.start(nextStartTime);
   nextStartTime += buf.duration;
+  noteLocalPlayback(nextStartTime); // nextStartTime already IS the scheduled tail
 
   liveSources.add(src);
   updateSpeakingIndicator();
@@ -2566,6 +2590,10 @@ function flushPlayback() {
   for (const s of liveSources) { try { s.stop(); } catch {} }
   liveSources.clear();
   nextStartTime = 0;
+  // Every scheduled source was just stopped, so the speaker is silent NOW — collapse
+  // the tail to "now" too (the max-only rule in noteLocalPlayback protects concurrent
+  // schedulers, not a hard stop like this one).
+  localPlaybackTailTime = playCtx ? playCtx.currentTime : 0;
   updateSpeakingIndicator();
 }
 
@@ -2631,7 +2659,9 @@ const stallWatchdog = {
     src.buffer = this.buffers[idx];
     src.connect(ctx.destination);
     if (avatarAudioTapNode) src.connect(avatarAudioTapNode);
-    src.start();
+    const startTime = ctx.currentTime;
+    src.start(startTime);
+    noteLocalPlayback(startTime + this.buffers[idx].duration);
 
     this.activeSource = src;
     liveSources.add(src);
@@ -2803,9 +2833,13 @@ async function startCapture(isOpenMic) {
     if (d.peak !== undefined) {
       pushWaveform(d.peak);
     }
-    // Streams while the button is actively held (PTT) OR open-mic mode owns the mic
-    // continuously. Frames produced outside both gates are dropped, never sent.
-    if (d.pcm && (isHeld || openMicStreaming) && ws && ws.readyState === WebSocket.OPEN) {
+    // Streams while the button is actively held (PTT) OR open-mic mode owns the mic AND
+    // local speaker output isn't (recently) active. The assistantAudioActive() half of
+    // the gate is a client-side half-duplex: without it, an always-hot open mic picks up
+    // the assistant's own reply off the speaker and loops on itself. PTT is deliberately
+    // NOT gated on it — holding the button while the assistant speaks is the existing
+    // barge-in path and must keep working exactly as today.
+    if (d.pcm && (isHeld || (openMicStreaming && !assistantAudioActive())) && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(d.pcm); // raw binary int16 16k mono
     }
   };
