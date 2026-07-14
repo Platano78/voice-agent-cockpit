@@ -18,7 +18,10 @@ Design:
   logged once and treated as an immediate, permanent wake for the rest of
   the session -- a broken detector must never brick the assistant.
 * **Calibration affordance.** Any score above 0.05 is logged at DEBUG so the
-  threshold can be tuned against a real microphone.
+  threshold can be tuned against a real microphone. A score at or above 0.25
+  that doesn't cross the (higher) detection threshold is also logged at INFO
+  as a near miss -- visible at the live log level, unlike the DEBUG line, so
+  a real attempt that fell short leaves journal evidence.
 * **Arbitrary frame boundaries.** ``feed()`` accumulates raw bytes into an
   internal buffer and only scores complete 1280-sample (80ms) frames --
   WebSocket frames arrive as multiples of 512 samples, not 1280, so a
@@ -48,6 +51,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _FRAME_SAMPLES = 1280  # 80ms @ 16kHz, openWakeWord's native hop size
 _FRAME_BYTES = _FRAME_SAMPLES * 2  # int16 mono
 _SCORE_LOG_FLOOR = 0.05  # calibration affordance: log anything above the noise floor
+_NEAR_MISS_FLOOR = 0.25  # visibility affordance: log a near-miss at INFO (not just DEBUG)
 
 # openWakeWord ships non-wake-phrase files (feature extractors, VAD, timer/weather
 # demo models) alongside the pretrained wake-phrase models in the same directory --
@@ -220,6 +224,8 @@ class WakewordGate:
                 if not self._awake and score >= self.threshold:
                     self._awake = True
                     logger.info("wake word %r detected (score=%.3f)", self.phrase, score)
+                elif not self._awake and score >= _NEAR_MISS_FLOOR:
+                    logger.info("wake word near miss (score=%.3f)", score)
 
             return max_score
 

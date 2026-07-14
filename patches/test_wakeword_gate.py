@@ -135,6 +135,33 @@ def test_predict_exception_fails_open(monkeypatch):
     assert gate.awake is True
 
 
+# ── near-miss visibility: scores >= 0.25 log at INFO unless they cross ──
+# ── the detection threshold (which already logs at INFO on its own) ─────
+
+
+@pytest.mark.parametrize(
+    ("score", "expect_near_miss", "expect_detected"),
+    [
+        (0.3, True, False),
+        (0.1, False, False),
+        (0.9, False, True),
+    ],
+)
+def test_near_miss_logging(monkeypatch, caplog, score, expect_near_miss, expect_detected):
+    monkeypatch.setenv("VOICE_WAKE_WORD_THRESHOLD", "0.5")
+    gate = wg.WakewordGate()
+    fake = FakeModel(score=score)
+    monkeypatch.setattr(gate, "_load_model", lambda: fake)
+
+    with caplog.at_level("INFO", logger=wg.logger.name):
+        gate.feed(_silence(wg._FRAME_SAMPLES))
+
+    near_miss_logged = any("near miss" in r.message for r in caplog.records)
+    detected_logged = any("detected" in r.message for r in caplog.records)
+    assert near_miss_logged is expect_near_miss
+    assert detected_logged is expect_detected
+
+
 # ── (g) reset() re-arms and clears the buffer ────────────────────────────
 
 

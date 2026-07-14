@@ -2125,11 +2125,24 @@ function renderConfigState(ev) {
   updateSessionRail(ev, active);
 }
 
+const applyPersonaBtnLabel = els.applyPersonaBtn.textContent;
+let applyPersonaFlashGuard = false;
 els.applyPersonaBtn.addEventListener("click", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", persona: els.personaInput.value }));
+
+    if (!applyPersonaFlashGuard) {
+      applyPersonaFlashGuard = true;
+      els.applyPersonaBtn.textContent = "Applied ✓";
+      setTimeout(() => {
+        els.applyPersonaBtn.textContent = applyPersonaBtnLabel;
+        applyPersonaFlashGuard = false;
+      }, 1200);
+    }
   }
 });
+const resetChatBtnLabel = els.resetChatBtn.textContent;
+let resetChatFlashGuard = false;
 els.resetChatBtn.addEventListener("click", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", reset_chat: true }));
@@ -2137,6 +2150,21 @@ els.resetChatBtn.addEventListener("click", () => {
   document.documentElement.setAttribute("data-mood", "neutral");
   if (els.sessionMood) els.sessionMood.textContent = "neutral";
   window.__avatarMood?.("neutral"); // this handler bypasses applyMoodFromTools — keep the avatar in sync too
+
+  els.transcript.textContent = "—";
+  els.assistant.textContent = "—";
+  pendingHistoryEntry = null;
+  conversationHistory = [];
+  renderHistory();
+
+  if (!resetChatFlashGuard) {
+    resetChatFlashGuard = true;
+    els.resetChatBtn.textContent = "Reset ✓";
+    setTimeout(() => {
+      els.resetChatBtn.textContent = resetChatBtnLabel;
+      resetChatFlashGuard = false;
+    }, 1200);
+  }
 });
 els.reloadToolsBtn.addEventListener("click", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {

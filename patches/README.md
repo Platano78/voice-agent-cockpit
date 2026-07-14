@@ -114,7 +114,11 @@ kept as an instant rollback (see below).
   Env-driven, off by default: `VOICE_WAKE_WORD=1` (truthy: `1`/`true`/`yes`/`on`)
   arms it; `VOICE_WAKE_WORD_MODEL` (default `hey_jarvis`, any openWakeWord
   pretrained model name or a path to a custom `.onnx`) selects the model;
-  `VOICE_WAKE_WORD_THRESHOLD` (default `0.5`) sets the score gate. While
+  `VOICE_WAKE_WORD_THRESHOLD` (default `0.5`) sets the score gate; scores at
+  or above `0.25` that don't cross it log a "near miss" at INFO (visible at
+  the live log level) so a real attempt that fell short still leaves journal
+  evidence — anything above `0.05` still also logs at DEBUG for finer
+  calibration. While
   armed and not yet awake, `websocket_streamer.py`'s binary branch routes
   mic audio through `WakewordGate.feed()` instead of `input_queue` — the
   pipeline stays deaf until the wake phrase scores above threshold, then
@@ -156,6 +160,40 @@ kept as an instant rollback (see below).
   `weather`) — this is the custom-model seam: drop a trained `.onnx` into
   that directory and it auto-appears in the dropdown next time the panel
   refreshes, no code change needed.
+
+- `think_filter.py` (new) — `speech_to_speech/think_filter.py`. Defines
+  `ThinkTagFilter`, a dependency-free (stdlib only) stateful streaming
+  suppressor for literal `<think>...</think>` reasoning spans. Some local
+  reasoning models (e.g. `reasoning-qwen36-27b-mtp` behind llama.cpp) emit
+  their reasoning as `<think>...</think>` in the regular chat-completions
+  `content` field even with `chat_template_kwargs.enable_thinking=false` —
+  probed live: `content` was `"<think>\n\n</think>\n\nHi there friend"`.
+  Without filtering, this reasoning text is spoken by TTS. `feed(text)`
+  streams a chunk through and returns the safe-to-emit portion (a tag can
+  straddle a chunk boundary, so a partial-tag prefix is buffered across
+  calls); `flush()` is called once at stream end and returns any buffered
+  prefix that turned out to be innocent text (an unclosed `<think>` is
+  suppressed instead, since it was reasoning that never finished). Also
+  swallows the leading newline run right after a closed think span so TTS
+  doesn't see a leading blank chunk. No `speech_to_speech` import, so it (and
+  `test_think_filter.py`) is importable/testable standalone.
+
+- `chat_completions_language_model.py` (new) —
+  `speech_to_speech/LLM/chat_completions_language_model.py`. Wires
+  `ThinkTagFilter` into `ChatCompletionsApiModelHandler`: `_iter_stream_events`
+  runs one filter instance per streamed response, feeding each delta's raw
+  text through it and only accumulating the *filtered* piece into `raw_text`
+  (the flush remnant is folded in the same way) before yielding a
+  `TextDelta` — so `raw_text`, which becomes the `AssistantMessage` written
+  back to conversation history, never contains a think span either; the
+  model would otherwise re-read its own suppressed reasoning as context on
+  every later turn, and an all-thinking response would silently store
+  thinking while speaking nothing. The existing `if raw_text.strip():`
+  guard then naturally skips emitting an `AssistantMessage` at all for a
+  response that was 100% reasoning. `_iter_response_events` (non-streaming)
+  runs the whole response's text through a one-shot `feed()` + `flush()`
+  before yielding it, so both the `AssistantMessage` and `TextDelta` there
+  are filtered identically.
 
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
