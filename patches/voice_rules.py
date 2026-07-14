@@ -51,6 +51,11 @@ def apply_system_rules(messages: list[dict[str, Any]], rules: str = RULES) -> li
     system message. Never mutates the input list or its dicts -- only
     copies are modified, since the ``Chat`` object owns the originals.
 
+    Treat the RETURNED list as read-only: it deliberately shares unmodified
+    message dicts with the input (copy-on-write -- deep-copying would
+    duplicate large multimodal payloads per request). Mutating the result
+    would therefore reach back into the ``Chat``-owned originals.
+
     No-op (returns ``messages`` unchanged) when ``rules`` is empty, or when
     ``rules`` is already present in the system content (idempotence guard
     against any double-serialize path).
