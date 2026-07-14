@@ -2121,6 +2121,9 @@ function renderConfigState(ev) {
       els.wakeModelSelect.appendChild(opt);
     });
   }
+  // Mode flag lives on whatever the server reports — config_state is the source of
+  // truth on connect/reconnect; wakeword_state events (below) keep it live in between.
+  setOpenMicMode(hasWakeWord && !!wakeWord.enabled, wakeWord && wakeWord.phrase);
 
   updateSessionRail(ev, active);
 }
@@ -2232,6 +2235,10 @@ function connect() {
     log("ws closed; retrying in 2s");
     releaseWakeLock();
     stallWatchdog.disarm();
+    // Stop any live open-mic streaming and reset the mode flag itself (not just the
+    // graph) so the next config_state after reconnect sees a real off→on transition
+    // and re-arms cleanly, instead of no-op'ing against a stale "already on" flag.
+    if (openMic) { openMic = false; openMicStreaming = false; resetWaveform(); teardownMic(); }
     setTimeout(connect, 2000);
   };
   ws.onerror = () => { log("ws error"); };
@@ -2432,14 +2439,17 @@ function handleEvent(text) {
       break;
     case "wakeword_state":
       if (ev.state === "asleep") {
+        setOpenMicMode(true, ev.phrase);
         setStatus("connecting", `zzz — say "${ev.phrase || "the wake word"}" to wake`);
         log("wakeword: asleep" + (ev.phrase ? ` (say "${ev.phrase}")` : ""));
         if (els.wakeToggle) els.wakeToggle.checked = true;
       } else if (ev.state === "awake") {
+        setOpenMicMode(true, ev.phrase); // already armed — idempotent no-op on the capture graph
         setStatus("connected", "connected");
         log("wake word detected score=" + ev.score);
         playWakeChime();
       } else if (ev.state === "off") {
+        setOpenMicMode(false);
         setStatus("connected", "connected");
         if (els.wakeToggle) els.wakeToggle.checked = false;
       }
@@ -2593,7 +2603,9 @@ const stallWatchdog = {
   },
 
   arm() {
-    if (!this.enabled || capturing) return; // never stall while the user is actively streaming speech
+    // Gate on isHeld (PTT-hold), not `capturing` — in open-mic mode the graph stays live
+    // for the whole armed session, so `capturing` alone would permanently block the arm.
+    if (!this.enabled || isHeld) return; // never stall while the user is actively holding to talk
     this.disarm(); // clear any stale timers/clip left over from a prior turn
     this.firedCount = 0;
     this.timers.push(setTimeout(() => this._fire(), STALL_FIRST_DELAY_MS));
@@ -2650,7 +2662,10 @@ let micStream = null;
 let micCtx = null;
 let micNode = null;
 let capturing = false;   // mic graph is live
-let isHeld = false;      // button physically held — the ONLY gate on outbound audio
+let isHeld = false;      // button physically held — one of the two gates on outbound audio
+let openMic = false;         // mode flag: true iff the server reports wake word enabled
+let openMicStreaming = false; // true while the continuous open-mic capture graph is live and sending
+let openMicPhrase = "the wake word"; // cached for the armed-caption text
 
 // Rolling bar-graph waveform driven by the worklet's peak samples.
 const wbars = Array.from(els.waveform.querySelectorAll(".wbar"));
@@ -2725,14 +2740,16 @@ class Cap extends AudioWorkletProcessor {
 registerProcessor('cap', Cap);
 `;
 
-async function startCapture() {
+async function startCapture(isOpenMic) {
   if (capturing) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { log("not connected"); return; }
   capturing = true;
 
-  // barge-in: kill any assistant audio the moment the user starts talking
-  flushPlayback();
-  stallWatchdog.disarm();
+  if (!isOpenMic) {
+    // barge-in: kill any assistant audio the moment the user starts talking
+    flushPlayback();
+    stallWatchdog.disarm();
+  }
 
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
@@ -2740,13 +2757,22 @@ async function startCapture() {
     });
   } catch (e) {
     capturing = false;
+    if (isOpenMic) {
+      // No prior grant (or a browser that needs a gesture): do NOT loop — hand control
+      // back to the (now enabled) PTT button as a one-tap "arm" affordance; a real tap
+      // is a user gesture and will retry via press() → startCapture(true).
+      els.ptt.disabled = false;
+      els.pttCaption.textContent = "Tap to arm microphone";
+      log("open-mic getUserMedia failed, awaiting tap: " + e.message);
+      return;
+    }
     setStatus("error", "mic denied");
     log("getUserMedia failed: " + e.message);
     return;
   }
 
-  // Released during the mic-permission await? Abort cleanly — never leave a live graph.
-  if (!isHeld) { resetWaveform(); teardownMic(); log("released during setup; aborted"); return; }
+  // Released (or mode turned off) during the mic-permission await? Abort cleanly — never leave a live graph.
+  if (!(isOpenMic ? openMic : isHeld)) { resetWaveform(); teardownMic(); log("released during setup; aborted"); return; }
 
   // Prefer a 16k context so no resampling is needed.
   try {
@@ -2768,8 +2794,8 @@ async function startCapture() {
     URL.revokeObjectURL(blobUrl);
   }
 
-  // Released while the worklet module was loading? Abort — don't wire up a live graph.
-  if (!isHeld) { resetWaveform(); teardownMic(); log("released during setup; aborted"); return; }
+  // Released (or mode turned off) while the worklet module was loading? Abort — don't wire up a live graph.
+  if (!(isOpenMic ? openMic : isHeld)) { resetWaveform(); teardownMic(); log("released during setup; aborted"); return; }
 
   micNode = new AudioWorkletNode(micCtx, "cap");
   micNode.port.onmessage = (e) => {
@@ -2777,9 +2803,9 @@ async function startCapture() {
     if (d.peak !== undefined) {
       pushWaveform(d.peak);
     }
-    // TRUE push-to-talk: only stream while the button is actively held.
-    // Frames produced outside a hold (or after release) are dropped, never sent.
-    if (d.pcm && isHeld && ws && ws.readyState === WebSocket.OPEN) {
+    // Streams while the button is actively held (PTT) OR open-mic mode owns the mic
+    // continuously. Frames produced outside both gates are dropped, never sent.
+    if (d.pcm && (isHeld || openMicStreaming) && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(d.pcm); // raw binary int16 16k mono
     }
   };
@@ -2790,10 +2816,18 @@ async function startCapture() {
   micNode.connect(sink);
   sink.connect(micCtx.destination);
 
-  els.ptt.classList.add("recording");
-  els.pttCaption.textContent = "Listening… (release to send)";
-  setStatus("connected", "recording");
-  log("capture start @ " + micCtx.sampleRate + "Hz");
+  if (isOpenMic) {
+    openMicStreaming = true;
+    els.ptt.classList.remove("recording");
+    els.ptt.disabled = true;
+    els.pttCaption.textContent = `Wake word armed — say "${openMicPhrase}"`;
+    log("open-mic capture start @ " + micCtx.sampleRate + "Hz");
+  } else {
+    els.ptt.classList.add("recording");
+    els.pttCaption.textContent = "Listening… (release to send)";
+    setStatus("connected", "recording");
+    log("capture start @ " + micCtx.sampleRate + "Hz");
+  }
 }
 
 // Tear down the mic graph and release the device. Safe to call with partial/null state.
@@ -2831,13 +2865,52 @@ async function stopCapture() {
   log("capture stop; sent tail silence");
 }
 
+// ── Open-mic mode ─────────────────────────────────────────────────────
+// Entered/exited only from server-reported wake-word state (renderConfigState +
+// the wakeword_state event) — never toggled by the PTT button directly. While
+// armed, the mic streams continuously and the server VAD owns end-of-turn, so
+// none of the PTT tail-silence/"processing…" machinery in stopCapture() applies;
+// see teardownMic() below, which is the same reuse stopCapture() itself uses.
+function setOpenMicMode(on, phrase) {
+  if (on === openMic) return; // idempotent — repeated same-state calls are no-ops
+  openMic = on;
+  if (on) {
+    openMicPhrase = phrase || "the wake word";
+    startCapture(true);
+  } else {
+    openMicStreaming = false;
+    resetWaveform();
+    teardownMic();
+    els.ptt.classList.remove("recording");
+    els.ptt.disabled = !(ws && ws.readyState === WebSocket.OPEN);
+    els.pttCaption.textContent = "Hold to talk";
+  }
+}
+
 // ── PTT button: mouse + touch ────────────────────────────────────────
-// isHeld is set SYNCHRONOUSLY here (before the async startCapture runs) and is the
-// single source of truth for "should audio be flowing". The worklet gates ws.send on
-// it, so no frame can escape unless the button is down at that instant.
+// isHeld is set SYNCHRONOUSLY here (before the async startCapture runs) and, together
+// with openMicStreaming, is the source of truth for "should audio be flowing". The
+// worklet gates ws.send on (isHeld || openMicStreaming), so no frame can escape unless
+// one of those is true at that instant.
 const ptt = els.ptt;
-function press(e) { e.preventDefault(); isHeld = true; startCapture(); }
-function release(e) { if (e) e.preventDefault(); isHeld = false; stopCapture(); }
+function press(e) {
+  e.preventDefault();
+  if (openMic) {
+    // Open-mic owns the mic continuously — no hold semantics. The only live case here
+    // is the one-tap "arm" fallback (see startCapture's getUserMedia catch): a real tap
+    // is a user gesture, so retry the continuous capture rather than treating it as PTT.
+    if (!openMicStreaming) startCapture(true);
+    return;
+  }
+  isHeld = true;
+  startCapture();
+}
+function release(e) {
+  if (e) e.preventDefault();
+  if (openMic) return; // no PTT release path while wake word owns the mic (see press())
+  isHeld = false;
+  stopCapture();
+}
 // Mouse — release on window so dragging off the button still ends the turn.
 ptt.addEventListener("mousedown", press);
 window.addEventListener("mouseup", release);
