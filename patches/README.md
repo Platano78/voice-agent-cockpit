@@ -193,7 +193,28 @@ kept as an instant rollback (see below).
   response that was 100% reasoning. `_iter_response_events` (non-streaming)
   runs the whole response's text through a one-shot `feed()` + `flush()`
   before yielding it, so both the `AssistantMessage` and `TextDelta` there
-  are filtered identically.
+  are filtered identically. `_serialize` also wraps its return in
+  `voice_rules.apply_system_rules` (see below) — the only other change to
+  this file.
+
+- `voice_rules.py` (new) — `speech_to_speech/voice_rules.py`. Pipeline
+  invariant, not a persona setting: probed regression is qwen3.6 in no-think
+  mode collapsing answer length as chat history grows (27 completion tokens
+  for a 400-word ask vs 415 with a system-prompt line telling it to answer
+  completely). The fix was first tried as a runtime persona edit, which is
+  the wrong layer — a persona author has no way to know they need an
+  anti-truncation instruction, and every persona (and every brain swap)
+  would otherwise have to carry it individually. `apply_system_rules()`
+  instead appends (or inserts) a short system-level instruction onto the
+  serialised message list at request-assembly time in
+  `ChatCompletionsApiModelHandler._serialize`, invisible to the persona
+  editor and applied to every brain. `VOICE_SYSTEM_RULES` overrides the
+  built-in `DEFAULT_RULES` text; the special value `off` (case-insensitive)
+  disables it entirely; unset/blank falls back to `DEFAULT_RULES`. Never
+  mutates the `Chat`-owned message list/dicts (copies before modifying);
+  idempotent (skips re-appending if the rules text is already present in
+  the system content) and dependency-free (stdlib only, no
+  `speech_to_speech` import), like `think_filter.py`.
 
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
