@@ -147,5 +147,9 @@ equivalent) and report exactly what was wired to which protocol frame.
 - [x] Slice A dispatched / gates green / verified 3-way (haiku found 1 MAJOR: partial-safetensors leak → fixed via atomic_export_state temp+os.replace; +2 orchestrator rulings: voice_delete broadcast, begin-disagreement downgrade; final 147 passed/3 skipped)
 - [x] Slice B dispatched / gates green / verified 3-way (haiku live-probed the WAV encoder ±1 LSB + fact-checked README; found stale-recording bug → clear-at-start fix; orchestrator found the never-yielding chunk loop → yield+backpressure fix; ctx-ref cleanup)
 - [x] README section (Custom voices: formats, HF gate setup, envs, consent clause — haiku fact-checked against research note)
-- [ ] Commit(s) + v1.3.0 candidate notes
-- [ ] Box deploy (full apply.sh — box lags repo; slice-4 lesson) + phone ear-test
+- [x] Commits: 99c5041 (slice A), e95a371 (slice B + README), d6d840f (apply.sh deploy fix)
+- [x] Box deploy: pulled to e95a371+, apply.sh gap caught pre-restart (voice_clone.py missing
+      from its cp list — would have crashed brain_control import; fixed as d6d840f), service
+      restarted healthy; live WS probe: config_state carries custom_voices, voice_clone_begin
+      → progress{receiving} (has_voice_cloning=True live)
+- [ ] User ear-test (record → clone → audition on phone) → then tag v1.3.0 + GitHub release
