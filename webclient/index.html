@@ -825,17 +825,35 @@
   }
   #voiceCloneAdvanced { margin-top: 10px; }
   #voiceCloneAdvanced summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: var(--tracking-label);
-    color: var(--text-muted);
+    color: var(--text);
     cursor: pointer;
     min-height: 44px;
-    display: flex;
-    align-items: center;
+    padding: 0 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    list-style: none; /* Firefox's own marker — display:flex already drops Chrome's; we draw a chevron ourselves */
   }
-  #voiceCloneAdvanced summary:hover { color: var(--accent); }
+  #voiceCloneAdvanced summary::-webkit-details-marker { display: none; }
+  #voiceCloneAdvanced summary:hover { background: var(--border); color: var(--accent); }
+  #voiceCloneAdvanced summary .chev {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+  }
+  #voiceCloneAdvanced[open] summary .chev { transform: rotate(90deg); }
+  @media (prefers-reduced-motion: reduce) {
+    #voiceCloneAdvanced summary .chev { transition: none; }
+  }
   #voiceCloneList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
   .voiceCloneRow {
     display: flex;
@@ -1396,7 +1414,7 @@
     <select id="wakeModelSelect"></select>
   </div>
   <details id="voiceCloneAdvanced" hidden>
-    <summary>Advanced — custom voice</summary>
+    <summary><span class="chev" aria-hidden="true">▸</span>Advanced — custom voice</summary>
     <div class="label">Your custom voices</div>
     <div id="voiceCloneList"></div>
     <div class="label">Add a voice</div>
