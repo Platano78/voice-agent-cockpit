@@ -141,6 +141,7 @@ them.
 | `VOICE_TOOLS_DIR` | *(unset)* | directory of drop-in local voice tools (one `.py` per tool) |
 | `VOICE_CLONE_DIR` | `~/speech-to-speech/voices` | where custom (cloned) voice states are stored |
 | `VOICE_AUDITION_TEXT` | `Hi, I'm {name}. This is how I sound.` | sample spoken after a voice switch; `off` disables |
+| `VOICE_PHONE_CONTEXT` | *(unset)* | set to `off` to disable phone context server-side, even if a client has it toggled on |
 
 ## Voice tools
 
@@ -215,6 +216,31 @@ recording normalization: `pip install soundfile`.
 **Consent notice**: pocket-tts's license prohibits "voice impersonation or
 cloning without explicit and lawful consent." Clone only voices you have the
 right to clone — your own, or a consenting speaker's.
+
+## Phone context (optional)
+
+The settings panel has a **Phone context** toggle, **off by default**: "Share
+location & phone state". When you turn it on, the browser streams your
+approximate location (via the W3C Geolocation API), timezone, and battery
+level/charging state to your own voice server over the same WebSocket the
+rest of the cockpit already uses — no new endpoint, no third-party service.
+This lets tools like `get_weather` and the LLM's sense of "now"/"here" work
+without you naming a place every time.
+
+It's sent only to your voice server, but the ambient line it produces reaches
+whichever brain is currently active — including a remote/cloud brain, if
+that's what you've selected in the Brain panel. If that matters to you,
+switch to a local brain before enabling it, or leave it off.
+
+Location updates are throttled client-side (moved >100m or 5+ minutes since
+the last send) and expire server-side after 30 minutes of staleness. Denying
+the browser's location permission prompt turns the toggle back off. Set
+`VOICE_PHONE_CONTEXT=off` on the server to disable the feature entirely,
+regardless of what any client has toggled.
+
+Any browser works — a phone gives GPS-grade accuracy, a desktop typically
+falls back to coarser IP/network-based geolocation, which is still useful for
+timezone/weather purposes.
 
 ## Attribution & acknowledgments
 

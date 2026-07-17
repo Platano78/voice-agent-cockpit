@@ -898,6 +898,8 @@
   #voiceCloneRecordBtn[aria-pressed="true"] { background: var(--bad); border-color: var(--bad); color: #fff; }
   #voiceCloneStatus { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-top: 8px; word-break: break-word; }
   #voiceCloneStatus.voiceCloneError { color: var(--bad); }
+  #phoneContextStatus { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-top: 4px; }
+  #phoneContextStatus.phoneContextError { color: var(--bad); }
   #personaLibRow { display: flex; gap: 6px; }
   #personaLibRow .panelBtn { width: auto; flex: 0 0 auto; margin-top: 0; padding: 8px 12px; }
   #personaNameInput {
@@ -1413,6 +1415,15 @@
     </div>
     <select id="wakeModelSelect"></select>
   </div>
+  <div id="phoneContextBlock">
+    <div class="label">Phone context</div>
+    <div class="brainOption">
+      <input type="checkbox" id="phoneContextToggle">
+      <label for="phoneContextToggle">Share location &amp; phone state</label>
+    </div>
+    <div class="hint">Used for weather and local time. Sent only to your voice server; the active brain sees an approximate location — including remote brains if you use one.</div>
+    <div id="phoneContextStatus" role="status" aria-live="polite"></div>
+  </div>
   <details id="voiceCloneAdvanced" hidden>
     <summary><span class="chev" aria-hidden="true">▸</span>Advanced — custom voice</summary>
     <div class="label">Your custom voices</div>
@@ -1590,6 +1601,8 @@ const els = {
   wakeWordBlock: document.getElementById("wakeWordBlock"),
   wakeToggle: document.getElementById("wakeToggle"),
   wakeModelSelect: document.getElementById("wakeModelSelect"),
+  phoneContextToggle: document.getElementById("phoneContextToggle"),
+  phoneContextStatus: document.getElementById("phoneContextStatus"),
   voiceCloneAdvanced: document.getElementById("voiceCloneAdvanced"),
   voiceCloneList: document.getElementById("voiceCloneList"),
   voiceCloneName: document.getElementById("voiceCloneName"),
@@ -2678,6 +2691,165 @@ els.wakeModelSelect.addEventListener("change", () => {
   }
 });
 
+// ── Phone context (opt-in; device-local, never routed through config_set) ──
+// Server side: patches/phone_context.py (validation) + websocket_streamer.py (routes
+// the bare `phone_context` frame type straight to `phone_context.update`, fire-and-
+// forget — no reply frame, ever). Unlike every other panel control this is NOT synced
+// via config_get/config_state: it's a per-device browser capability (geolocation/
+// battery permission), not a server-side setting, so it persists the same way the
+// theme choice does — localStorage, read once at load, never round-tripped.
+const PHONE_CONTEXT_KEY = "va-phone-context-enabled";
+const PHONE_CONTEXT_MOVE_METERS = 100;      // re-send threshold: moved this far since the last sent fix
+const PHONE_CONTEXT_MIN_INTERVAL_MS = 5 * 60 * 1000;   // ...or this much time has passed regardless
+const PHONE_CONTEXT_BATTERY_THROTTLE_MS = 60 * 1000;   // battery events fire often; throttle sends
+const PHONE_CONTEXT_MAX_AGE_MS = 30 * 60 * 1000;       // mirrors patches/phone_context.py's _DEFAULT_LOCATION_MAX_AGE_S (1800s)
+let phoneContextWatchId = null;
+let phoneContextBattery = null;   // BatteryManager, once (if ever) resolved
+let phoneContextLastPos = null;   // { lat, lon } of the last fix actually SENT
+let phoneContextLastPosTs = 0;
+let phoneContextLastBatteryTs = 0;
+let phoneContextLastFrame = null;   // most recently built frame — resent verbatim on WS reconnect
+let phoneContextLastFrameTs = 0;    // Date.now() when that frame was built, for the reconnect staleness check
+// Bumped on every start/stop so a getBattery() promise from a PRIOR session (e.g. rapid
+// toggle on->off->on) can recognize it's stale and refuse to attach listeners twice.
+let phoneContextGen = 0;
+
+function setPhoneContextStatus(text, isError) {
+  els.phoneContextStatus.textContent = text || "";
+  els.phoneContextStatus.classList.toggle("phoneContextError", !!isError);
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// `posFields` is {} for a battery-only refresh — every field is independently optional
+// server-side (patches/phone_context.py: a partial update merges onto the last-known
+// state), so omitting lat/lon here is a normal, well-formed frame, not a partial hack.
+function buildPhoneContextFrame(posFields) {
+  const frame = { type: "phone_context", ...posFields, tz: Intl.DateTimeFormat().resolvedOptions().timeZone };
+  if (phoneContextBattery) {
+    frame.battery_pct = Math.round(phoneContextBattery.level * 100);
+    frame.charging = !!phoneContextBattery.charging;
+  }
+  return frame;
+}
+
+function sendPhoneContextFrame(posFields) {
+  const frame = buildPhoneContextFrame(posFields);
+  phoneContextLastFrame = frame; // cached even if the socket is down, so a later reconnect can resend it
+  phoneContextLastFrameTs = Date.now();
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+}
+
+function onPhoneContextPosition(pos) {
+  const { latitude: lat, longitude: lon, accuracy } = pos.coords;
+  const now = Date.now();
+  const moved = phoneContextLastPos ? haversineMeters(phoneContextLastPos.lat, phoneContextLastPos.lon, lat, lon) : Infinity;
+  const dueForRefresh = now - phoneContextLastPosTs >= PHONE_CONTEXT_MIN_INTERVAL_MS;
+  if (phoneContextLastPos && moved < PHONE_CONTEXT_MOVE_METERS && !dueForRefresh) return; // nothing worth sending yet
+  phoneContextLastPos = { lat, lon };
+  phoneContextLastPosTs = now;
+  sendPhoneContextFrame({ lat, lon, accuracy });
+  setPhoneContextStatus("sharing location & phone state");
+}
+
+function onPhoneContextError(err) {
+  // PERMISSION_DENIED is unrecoverable without the user re-granting it in browser
+  // chrome — stop cleanly rather than let watchPosition keep firing this same error.
+  // Transient errors (POSITION_UNAVAILABLE/TIMEOUT) are left to watchPosition's own
+  // retry behavior; we just surface the status without tearing the feature down.
+  if (err && err.code === err.PERMISSION_DENIED) {
+    stopPhoneContext();
+    els.phoneContextToggle.checked = false;
+    try { localStorage.setItem(PHONE_CONTEXT_KEY, "0"); } catch {}
+    setPhoneContextStatus("location permission denied", true);
+    return;
+  }
+  setPhoneContextStatus("location temporarily unavailable", true);
+}
+
+function onPhoneContextBatteryChange() {
+  const now = Date.now();
+  if (now - phoneContextLastBatteryTs < PHONE_CONTEXT_BATTERY_THROTTLE_MS) return;
+  phoneContextLastBatteryTs = now;
+  sendPhoneContextFrame({}); // battery/tz refresh — server merges onto the last-known position
+}
+
+function setupPhoneContextBattery() {
+  if (!navigator.getBattery) return; // feature-detected; battery is ambient extra, never blocks location
+  const gen = phoneContextGen; // snapshot the session this call belongs to
+  navigator.getBattery().then((mgr) => {
+    // Bail if a stop (or a stop+restart) happened while this promise was in flight — a
+    // rapid on->off->on toggle can otherwise leave TWO getBattery() resolutions racing
+    // to bind listeners to the same BatteryManager, with stopPhoneContext only ever
+    // unbinding one pair. Both the generation check (this exact session is still live)
+    // and the null check (nothing already bound this session) must hold.
+    if (gen !== phoneContextGen || phoneContextBattery !== null) return;
+    phoneContextBattery = mgr;
+    mgr.addEventListener("levelchange", onPhoneContextBatteryChange);
+    mgr.addEventListener("chargingchange", onPhoneContextBatteryChange);
+  }).catch(() => {});
+}
+
+function startPhoneContext() {
+  if (phoneContextWatchId !== null) return; // already running
+  if (!navigator.geolocation) {
+    setPhoneContextStatus("geolocation isn't supported in this browser", true);
+    els.phoneContextToggle.checked = false;
+    return;
+  }
+  phoneContextGen++; // new session — any in-flight getBattery() from a prior session is now stale
+  phoneContextWatchId = navigator.geolocation.watchPosition(onPhoneContextPosition, onPhoneContextError, {
+    enableHighAccuracy: false,
+    maximumAge: 60000,
+  });
+  setupPhoneContextBattery();
+  setPhoneContextStatus("waiting for a location fix…");
+}
+
+function stopPhoneContext() {
+  phoneContextGen++; // invalidate any getBattery() promise still in flight for the session just ending
+  if (phoneContextWatchId !== null) {
+    navigator.geolocation.clearWatch(phoneContextWatchId);
+    phoneContextWatchId = null;
+  }
+  if (phoneContextBattery) {
+    phoneContextBattery.removeEventListener("levelchange", onPhoneContextBatteryChange);
+    phoneContextBattery.removeEventListener("chargingchange", onPhoneContextBatteryChange);
+    phoneContextBattery = null;
+  }
+  phoneContextLastPos = null;
+  phoneContextLastPosTs = 0;
+  phoneContextLastBatteryTs = 0;
+  phoneContextLastFrame = null;
+  phoneContextLastFrameTs = 0;
+  setPhoneContextStatus("");
+}
+
+els.phoneContextToggle.addEventListener("change", () => {
+  if (els.phoneContextToggle.checked) {
+    try { localStorage.setItem(PHONE_CONTEXT_KEY, "1"); } catch {}
+    startPhoneContext();
+  } else {
+    try { localStorage.setItem(PHONE_CONTEXT_KEY, "0"); } catch {}
+    stopPhoneContext();
+  }
+});
+(function initPhoneContext() {
+  let saved = null;
+  try { saved = localStorage.getItem(PHONE_CONTEXT_KEY); } catch {}
+  if (saved === "1") {
+    els.phoneContextToggle.checked = true;
+    startPhoneContext();
+  }
+})();
+
 // ── Wake lock ────────────────────────────────────────────────────────
 // Keep the screen on while connected so a mid-conversation dim doesn't kill
 // the mic/audio graph. Best-effort: unsupported browsers no-op silently.
@@ -2714,6 +2886,22 @@ function connect() {
     els.pttCaption.textContent = "Hold to talk";
     log("ws open " + WS_URL);
     ws.send(JSON.stringify({ type: "config_get" }));
+    // A pipeline restart loses phone_context's in-memory store — resend the last built
+    // frame immediately so ambient context survives a reconnect. Gated on age (mirrors
+    // the server's own 30-min staleness cutoff): resending an hours-old cached fix
+    // verbatim would stamp a fresh server-side ts on stale data (e.g. phone slept
+    // overnight, reconnects in the morning still "sharing" last night's location) and
+    // silently defeat that gate. When it's too stale to resend, also clear the sent-
+    // position memory so the very next real fix bypasses the 100m/5min throttle and
+    // reaches the server as soon as the browser has it, instead of waiting it out.
+    if (phoneContextLastFrame && Date.now() - phoneContextLastFrameTs < PHONE_CONTEXT_MAX_AGE_MS) {
+      ws.send(JSON.stringify(phoneContextLastFrame));
+    } else if (phoneContextLastFrame) {
+      phoneContextLastFrame = null;
+      phoneContextLastFrameTs = 0;
+      phoneContextLastPos = null;
+      phoneContextLastPosTs = 0;
+    }
     acquireWakeLock();
   };
   ws.onclose = () => {
