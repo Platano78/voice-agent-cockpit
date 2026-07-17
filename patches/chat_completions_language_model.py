@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Iterator
 from typing import Any, cast
 
+import httpx
 from openai import Stream
 from openai.types.chat import (
     ChatCompletionChunk,
@@ -40,6 +42,62 @@ from speech_to_speech.utils.utils import _generate_id
 from speech_to_speech.voice_rules import apply_system_rules
 
 logger = logging.getLogger(__name__)
+
+# Runaway-generation guards: neither the client nor llama-server otherwise
+# bounds how long a stream can run or how many tokens it can emit, and
+# httpx's own per-read timeout resets on every byte -- a slow trickle of
+# chunks (bare SSE comments or empty-delta chunks every few seconds) defeats
+# it indefinitely. These two knobs bound the pathology directly.
+_DEFAULT_STREAM_MAX_S = 120.0
+_DEFAULT_MAX_TOKENS = 1024
+
+
+def _parse_stream_max_s() -> float | None:
+    """Parse VOICE_STREAM_MAX_S: the max wall-clock duration (seconds) a
+    single streamed response may run before the total-duration watchdog
+    aborts it. Unset or blank falls back to the default (120.0). The
+    special value "0" or "off" (case-insensitive) disables the watchdog
+    entirely (returns None), as does any non-positive value. Malformed
+    values fall back to the default. Never raises.
+    """
+    raw = os.environ.get("VOICE_STREAM_MAX_S")
+    if raw is None:
+        return _DEFAULT_STREAM_MAX_S
+    stripped = raw.strip()
+    if not stripped:
+        return _DEFAULT_STREAM_MAX_S
+    if stripped.lower() == "off":
+        return None
+    try:
+        value = float(stripped)
+    except ValueError:
+        return _DEFAULT_STREAM_MAX_S
+    return value if value > 0 else None
+
+
+def _parse_max_tokens() -> int | None:
+    """Parse VOICE_MAX_TOKENS: a client-side cap on completion tokens per
+    request, passed through as ``max_tokens``. Unset or blank falls back to
+    the default (1024) -- several minutes of spoken audio, far beyond any
+    legitimate voice turn, so it cannot collide with the anti-truncation
+    invariant in voice_rules.py; it bounds pathological runaway generations,
+    not honest answers. The special value "0" or "off" (case-insensitive)
+    disables the cap entirely (returns None), as does any non-positive
+    integer. Malformed values fall back to the default. Never raises.
+    """
+    raw = os.environ.get("VOICE_MAX_TOKENS")
+    if raw is None:
+        return _DEFAULT_MAX_TOKENS
+    stripped = raw.strip()
+    if not stripped:
+        return _DEFAULT_MAX_TOKENS
+    if stripped.lower() == "off":
+        return None
+    try:
+        value = int(stripped)
+    except ValueError:
+        return _DEFAULT_MAX_TOKENS
+    return value if value > 0 else None
 
 
 def _to_chat_tools(req_tools: Any) -> list[ChatCompletionToolParam] | None:
@@ -196,6 +254,9 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         create_kwargs: dict[str, Any] = dict(optional_kwargs)
         if self.stream:
             create_kwargs["stream_options"] = {"include_usage": True}
+        max_tokens = _parse_max_tokens()
+        if max_tokens is not None:
+            create_kwargs["max_tokens"] = max_tokens
         return self.client.chat.completions.create(
             model=self.model_name,
             messages=api_input,  # type: ignore[arg-type]  # runtime dicts match the Chat Completions message shape
@@ -213,7 +274,23 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         usage: Usage | None = None
         raw_text = ""
         think_filter = ThinkTagFilter()
+        # Total-duration watchdog: httpx's per-read timeout resets on ANY byte
+        # arrival, so it still covers a fully-silent stall but never fires
+        # against a slow trickle of chunks (bare SSE comments or empty-delta
+        # chunks arriving every few seconds defeat it indefinitely, proven
+        # on-box). This check covers that trickle case instead, firing within
+        # one inter-chunk gap after the deadline. `deadline` stays None (and
+        # the check is skipped) when the watchdog is disabled.
+        stream_max_s = _parse_stream_max_s()
+        deadline = time.monotonic() + stream_max_s if stream_max_s is not None else None
         for chunk in api_response:
+            if deadline is not None and time.monotonic() > deadline:
+                # Reuse httpx.ReadTimeout deliberately: the base class's
+                # existing `except httpx.ReadTimeout` around stream
+                # consumption already turns it into a spoken apology, a
+                # clean turn end, and `api_response.close()` in a finally --
+                # that recovery path is exactly what a wedged stream needs.
+                raise httpx.ReadTimeout(f"stream exceeded {stream_max_s:.0f}s total-duration watchdog")
             # Usage-only trailing chunk (choices == []) when include_usage is set.
             if chunk.usage is not None:
                 usage = Usage(

@@ -41,6 +41,22 @@ you at install time.
   lets you register several brains in `brains.json` and hot-swap between them
   from the cockpit UI without restarting the service.
 
+### One conversation, many screens
+
+Every connected browser is a window onto the **same** session: one chat
+history, one brain, one voice. Start a conversation at the desk, continue it
+from the phone — that continuity is deliberate. Events are broadcast live to
+whoever is connected at that moment (there is no history replay on join, so a
+device that reconnects only shows what happened after it joined).
+
+If you want genuinely separate conversations per device, don't look for a
+toggle — run a **second pipeline instance** on another port (`--ws_port 8766`
+plus a second systemd unit) and point the other device at it. Both instances
+can share the same LLM endpoint, which is stateless per request; the cost is a
+second copy of STT+TTS on CPU. Per-client sessions inside one instance would
+require restructuring the upstream framework's single-conversation design and
+is not planned.
+
 ## Prerequisites
 
 - An **OpenAI-compatible chat-completions LLM endpoint** (local or remote).
