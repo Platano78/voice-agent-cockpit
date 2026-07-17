@@ -17,6 +17,7 @@ from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 from speech_to_speech.turn_stats import turn_stats
+from speech_to_speech.voice_clone import UploadManager
 from speech_to_speech.wakeword_gate import WakewordGate
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,11 @@ class WebSocketStreamer:
         self._last_cam_write = 0.0
         self._last_screen_write = 0.0
         self.wakeword_gate = WakewordGate()
+        # Custom voice cloning: chunk frames are buffered here (bytes only,
+        # no model work) keyed by client identity; only `voice_clone_begin`
+        # (validation) and `voice_clone_end` (assembled bytes + the actual
+        # build) reach `control_callback`. See patches/README.md.
+        self._voice_uploads = UploadManager()
 
     def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
@@ -234,8 +240,16 @@ class WebSocketStreamer:
                         await asyncio.to_thread(self._write_camera_frame, msg.get("data"))
                     elif msg.get("type") == "screen_frame":
                         await asyncio.to_thread(self._write_screen_frame, msg.get("data"))
-                    elif msg.get("type") in ("config_get", "config_set") and self.control_callback:
+                    elif msg.get("type") == "voice_clone_chunk":
+                        result = await asyncio.to_thread(self._voice_clone_chunk, client_id, msg.get("data"))
+                        if result is not None:
+                            await websocket.send(json.dumps(result))
+                    elif msg.get("type") == "voice_clone_end":
+                        await self._handle_voice_clone_end(client_id, websocket)
+                    elif msg.get("type") in ("config_get", "config_set", "voice_clone_begin") and self.control_callback:
                         result = await asyncio.to_thread(self.control_callback, msg)
+                        if msg.get("type") == "voice_clone_begin":
+                            result = self._resolve_voice_clone_begin_result(client_id, msg, result)
                         await websocket.send(json.dumps(result))
                     else:
                         logger.debug(f"Client {client_id}: ignoring unknown text frame type {msg.get('type')!r}")
@@ -244,6 +258,7 @@ class WebSocketStreamer:
             logger.error(f"Client {client_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
             self.clients.discard(websocket)
+            self._voice_uploads.abort(client_id)
             logger.info(f"Client {client_id} disconnected (finally block)")
 
             if len(self.clients) == 0:
@@ -272,6 +287,85 @@ class WebSocketStreamer:
             asyncio.run_coroutine_threadsafe(_send_all(), self.loop)
         except Exception:
             logger.debug("broadcast_wakeword_state failed", exc_info=True)
+
+    def broadcast_json(self, payload: dict[str, Any]) -> None:
+        """Push an arbitrary JSON payload to every connected client.
+        Thread-safe: safe to call from BrainControl's `asyncio.to_thread`
+        context (control messages are handled off the event loop), same
+        pattern as `broadcast_wakeword_state`. Best-effort -- never raises."""
+        try:
+            if self.loop is None:
+                return
+            data = json.dumps(payload)
+
+            async def _send_all() -> None:
+                await asyncio.gather(
+                    *[client.send(data) for client in self.clients],
+                    return_exceptions=True,
+                )
+
+            asyncio.run_coroutine_threadsafe(_send_all(), self.loop)
+        except Exception:
+            logger.debug("broadcast_json failed", exc_info=True)
+
+    def _resolve_voice_clone_begin_result(self, client_id: int, msg: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """Given BrainControl's response to a `voice_clone_begin`, open the
+        local chunk-buffering session on success. `UploadManager.begin`
+        re-checks the same structural rules (name format/ext/size) BrainControl
+        already validated -- if the two ever disagreed, a client that got a
+        "receiving" progress frame would otherwise hit "no upload in
+        progress" on every following chunk with no explanation. Downgrade to
+        an explicit `voice_clone_result` error instead, and never leave a
+        session behind on that path."""
+        if result.get("type") != "voice_clone_progress":
+            return result
+        ok, error = self._voice_uploads.begin(client_id, msg.get("name"), msg.get("ext"), msg.get("size"))
+        if ok:
+            return result
+        self._voice_uploads.abort(client_id)
+        return {"type": "voice_clone_result", "ok": False, "name": msg.get("name"), "error": error}
+
+    def _voice_clone_chunk(self, client_id: int, data: Any) -> dict[str, Any] | None:
+        """Decode + buffer one `voice_clone_chunk` frame -- bytes only, no
+        model work; BrainControl is reached only at begin/end. Returns an
+        error `voice_clone_result` to send back, or `None` on a silent
+        successful buffer (no per-chunk ack in the protocol)."""
+        raw = None
+        if isinstance(data, str):
+            try:
+                raw = base64.b64decode(data, validate=True)
+            except Exception:
+                raw = None
+        if raw is None:
+            self._voice_uploads.abort(client_id)
+            return {"type": "voice_clone_result", "ok": False, "name": None, "error": "malformed chunk payload"}
+        ok, error, name = self._voice_uploads.chunk(client_id, raw)
+        if ok:
+            return None
+        return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+
+    async def _handle_voice_clone_end(self, client_id: int, websocket: ServerConnection) -> None:
+        """Finalize the buffered upload and hand the assembled bytes to
+        BrainControl -- this is "the END frame triggers the BrainControl
+        call" from the protocol section."""
+        session, error = self._voice_uploads.end(client_id)
+        if session is None:
+            await websocket.send(json.dumps({"type": "voice_clone_result", "ok": False, "name": None, "error": error}))
+            return
+        if not self.control_callback:
+            await websocket.send(
+                json.dumps(
+                    {"type": "voice_clone_result", "ok": False, "name": session.name, "error": "voice cloning unavailable"}
+                )
+            )
+            return
+        try:
+            await websocket.send(json.dumps({"type": "voice_clone_progress", "stage": "building"}))
+        except Exception:
+            logger.debug("Client %s: voice_clone building notice failed", client_id, exc_info=True)
+        end_msg = {"type": "voice_clone_end", "name": session.name, "ext": session.ext, "data": session.data}
+        result = await asyncio.to_thread(self.control_callback, end_msg)
+        await websocket.send(json.dumps(result))
 
     def _write_camera_frame(self, data: Any) -> None:
         """Write the latest client camera frame to the tmpfs path the `look` vision

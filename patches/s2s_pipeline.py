@@ -797,6 +797,7 @@ def build_pipeline(
                 tts_handler=tts_handler,
                 cockpit=cockpit,
                 streamer=websocket_streamer_ref,
+                tts_queue=lm_processed_queue,
             ).handle
 
     return ThreadManager([*comms_handlers, *pipeline_handlers])

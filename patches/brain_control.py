@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 from typing import Any, Optional
 
@@ -9,6 +11,7 @@ import httpx
 from openai import OpenAI
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
+from speech_to_speech import voice_clone
 from speech_to_speech import voice_tools
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,7 @@ class BrainControl:
         tts_handler: Any = None,
         cockpit: Any = None,
         streamer: Any = None,
+        tts_queue: Any = None,
     ) -> None:
         self.llm_handler = llm_handler
         self.runtime_config = runtime_config
@@ -39,6 +43,11 @@ class BrainControl:
         self.active_brain = "coder"
         self.tts_handler = tts_handler
         self.cockpit = cockpit
+        # lm_processed_queue -- lets BrainControl inject an audition TTSInput
+        # after a voice change (ruling 8). None keeps every pre-existing
+        # call site/test valid -- auditioning is simply unavailable then,
+        # same pattern as `streamer`.
+        self.tts_queue = tts_queue
         # WebSocketStreamer, for wake-word control (gate lives on it) and
         # broadcasting wakeword_state after a config_set flips it. None keeps
         # every pre-existing call site/test valid -- wake word control is
@@ -138,6 +147,10 @@ class BrainControl:
                 return state
             if msg_type == "config_set":
                 return self._config_set(msg)
+            if msg_type == "voice_clone_begin":
+                return self._voice_clone_begin(msg)
+            if msg_type == "voice_clone_end":
+                return self._voice_clone_end(msg)
             return {"type": "config_ack", "ok": False, "error": f"unknown type: {msg_type}"}
         except Exception as e:
             logger.exception("BrainControl.handle failed")
@@ -165,6 +178,7 @@ class BrainControl:
             "default_persona": self.default_persona or "",
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
             "voices": self._predefined_voices() if self.tts_handler else [],
+            "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
             "tools_armed": self.tools_armed,
             "wake_word": self._wake_word_state(),
             "brains": [
@@ -195,6 +209,10 @@ class BrainControl:
                     chat_reset = True
             if "voice" in msg:
                 ok, error = self._set_voice(msg["voice"])
+                if not ok:
+                    return {"type": "config_ack", "ok": False, "error": error}
+            if "voice_delete" in msg:
+                ok, error = self._voice_delete(msg["voice_delete"])
                 if not ok:
                     return {"type": "config_ack", "ok": False, "error": error}
             if "persona" in msg:
@@ -241,6 +259,7 @@ class BrainControl:
                 "model": self.llm_handler.model_name,
                 "persona": self.runtime_config.session.instructions or "",
                 "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
+                "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
                 "tools_armed": self.tools_armed,
                 "wake_word": self._wake_word_state(),
                 "chat_reset": chat_reset,
@@ -287,17 +306,148 @@ class BrainControl:
     def _set_voice(self, name: str) -> tuple[bool, str]:
         if self.tts_handler is None:
             return False, "voice switching unavailable"
-        if name not in self._predefined_voices():
-            return False, f"unknown voice: {name}"
+
+        if name in self._predefined_voices():
+            source: Any = name
+        else:
+            # Custom (cloned) voice -- resolve to its sidecar state file.
+            path = voice_clone.voice_path(name)
+            if not path.is_file():
+                return False, f"unknown voice: {name}"
+            source = str(path)
 
         try:
             # Build the new state first so a failed load never leaves the
             # handler with a half-swapped voice.
-            new_state = self.tts_handler.model.get_state_for_audio_prompt(name)
+            new_state = self.tts_handler.model.get_state_for_audio_prompt(source)
         except Exception as e:
             logger.warning("BrainControl: voice load failed for %s: %s", name, e)
             return False, f"voice load failed: {name}"
 
         self.tts_handler.voice_state = new_state
         self.tts_handler.voice = name
+        self._audition(name)
         return True, ""
+
+    def _audition(self, name: str) -> None:
+        """After ANY successful voice change, speak a short sample through
+        the normal TTS path so the change is audible without a manual test
+        (ruling 8). `None` `turn_id`/`turn_revision` pass
+        `SpeculativeTurnTracker`'s staleness gate unconditionally (an
+        untracked turn id is always treated as latest). Best-effort: never
+        raises; silently no-ops with no `tts_queue` wired or when
+        `VOICE_AUDITION_TEXT=off`."""
+        if self.tts_queue is None:
+            return
+        text = voice_clone.resolve_audition_text(name)
+        if not text:
+            return
+        try:
+            from speech_to_speech.pipeline.messages import TTSInput
+
+            self.tts_queue.put(TTSInput(text=text, turn_id=None, turn_revision=None))
+        except Exception as e:
+            logger.warning("BrainControl: audition failed for %s: %s", name, e)
+
+    def _voice_delete(self, name: str) -> tuple[bool, str]:
+        if self.tts_handler is None:
+            return False, "voice switching unavailable"
+        ok, error = voice_clone.check_delete_allowed(name, self.tts_handler.voice, self._predefined_voices())
+        if not ok:
+            return False, error
+        ok, error = voice_clone.delete_voice(name)
+        if ok and self.streamer is not None:
+            # Same broadcast as _voice_clone_end -- every client's
+            # custom-voices dropdown needs to drop the deleted entry, not
+            # just the requesting one.
+            self.streamer.broadcast_json(self._config_state())
+        return ok, error
+
+    def _voice_clone_begin(self, msg: dict[str, Any]) -> dict[str, Any]:
+        name = msg.get("name")
+        ext = msg.get("ext")
+        size = msg.get("size")
+
+        if self.tts_handler is None:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": "voice cloning unavailable"}
+
+        ok, error = voice_clone.validate_name(name, self._predefined_voices())
+        if not ok:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+        ok, error = voice_clone.validate_extension(ext)
+        if not ok:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+        ok, error = voice_clone.validate_size(size)
+        if not ok:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+
+        if not getattr(self.tts_handler.model, "has_voice_cloning", False):
+            return {
+                "type": "voice_clone_result",
+                "ok": False,
+                "name": name,
+                "error": voice_clone.CLONING_UNAVAILABLE_MSG,
+            }
+
+        return {"type": "voice_clone_progress", "stage": "receiving"}
+
+    def _voice_clone_end(self, msg: dict[str, Any]) -> dict[str, Any]:
+        name = msg.get("name")
+        ext = msg.get("ext") or ""
+        raw = msg.get("data")
+
+        if self.tts_handler is None:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": "voice cloning unavailable"}
+        if not isinstance(raw, (bytes, bytearray)) or not raw:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": "empty upload"}
+
+        # Re-validate at build time -- defense in depth against a client that
+        # skipped or raced the begin-time check (chunk bytes are buffered by
+        # websocket_streamer independently of that check).
+        ok, error = voice_clone.validate_name(name, self._predefined_voices())
+        if not ok:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+        if not getattr(self.tts_handler.model, "has_voice_cloning", False):
+            return {
+                "type": "voice_clone_result",
+                "ok": False,
+                "name": name,
+                "error": voice_clone.CLONING_UNAVAILABLE_MSG,
+            }
+
+        with self._config_lock:
+            try:
+                wav_bytes = voice_clone.normalize_to_wav(bytes(raw), ext)
+            except voice_clone.VoiceCloneError as e:
+                return {"type": "voice_clone_result", "ok": False, "name": name, "error": str(e)}
+
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fh:
+                    fh.write(wav_bytes)
+                    tmp_path = fh.name
+                # Build the new state before touching the sidecar dir or the
+                # live handler -- same fail-safe build-before-swap order as
+                # _set_voice (ruling 2/7). Export is atomic (temp file +
+                # os.replace) so a failed export never leaves a partial
+                # .safetensors for list_custom_voices to serve, and never
+                # clobbers a pre-existing GOOD voice on a failed overwrite.
+                new_state = self.tts_handler.model.get_state_for_audio_prompt(tmp_path, truncate=True)
+                voice_clone.atomic_export_state(new_state, voice_clone.voice_path(name))
+            except Exception as e:
+                logger.warning("BrainControl: voice_clone build failed for %s: %s", name, e)
+                return {"type": "voice_clone_result", "ok": False, "name": name, "error": f"voice build failed: {e}"}
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+            self.tts_handler.voice_state = new_state
+            self.tts_handler.voice = name
+
+        self._audition(name)
+        if self.streamer is not None:
+            self.streamer.broadcast_json(self._config_state())
+        return {"type": "voice_clone_result", "ok": True, "name": name, "error": None}
