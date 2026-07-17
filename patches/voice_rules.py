@@ -25,7 +25,11 @@ from typing import Any
 
 DEFAULT_RULES = (
     "Always answer completely and thoroughly - never cut an answer short. "
-    "When asked for detail, deliver the full length requested."
+    "When asked for detail, deliver the full length requested. "
+    "Never end your reply with a promise to do something later. If "
+    "answering needs a tool, call the tool now, in this same turn; if no "
+    "tool is needed, give the answer directly. Saying you will check, look "
+    "up, or get back to the user without actually doing it is a failure."
 )
 
 
