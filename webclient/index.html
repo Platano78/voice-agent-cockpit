@@ -823,6 +823,63 @@
     padding: 8px;
     font: 13px/1.4 inherit;
   }
+  #voiceCloneAdvanced { margin-top: 10px; }
+  #voiceCloneAdvanced summary {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-label);
+    color: var(--text-muted);
+    cursor: pointer;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+  #voiceCloneAdvanced summary:hover { color: var(--accent); }
+  #voiceCloneList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .voiceCloneRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 44px;
+    padding: 4px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+  }
+  .voiceCloneEmpty { font-size: 12px; color: var(--text-muted); padding: 4px 0; }
+  .voiceCloneDeleteBtn {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--bad);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .voiceCloneDeleteBtn:hover { background: color-mix(in srgb, var(--bad) 15%, var(--bg)); }
+  #voiceCloneName {
+    width: 100%;
+    min-height: 44px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    font: 13px/1.4 inherit;
+    margin-top: 4px;
+  }
+  .voiceCloneLane { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .voiceCloneLane .panelBtn { width: auto; flex: 1 1 auto; min-width: 120px; margin-top: 0; }
+  #voiceCloneFile { flex: 1 1 160px; min-width: 0; font-size: 12px; color: var(--text-muted); }
+  #voiceCloneRecSeconds { flex: 0 0 auto; min-width: 40px; text-align: center; font-size: 12px; color: var(--text-muted); }
+  #voiceCloneRecordBtn[aria-pressed="true"] { background: var(--bad); border-color: var(--bad); color: #fff; }
+  #voiceCloneStatus { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-top: 8px; word-break: break-word; }
+  #voiceCloneStatus.voiceCloneError { color: var(--bad); }
   #personaLibRow { display: flex; gap: 6px; }
   #personaLibRow .panelBtn { width: auto; flex: 0 0 auto; margin-top: 0; padding: 8px 12px; }
   #personaNameInput {
@@ -1338,6 +1395,24 @@
     </div>
     <select id="wakeModelSelect"></select>
   </div>
+  <details id="voiceCloneAdvanced" hidden>
+    <summary>Advanced — custom voice</summary>
+    <div class="label">Your custom voices</div>
+    <div id="voiceCloneList"></div>
+    <div class="label">Add a voice</div>
+    <input type="text" id="voiceCloneName" placeholder="name (lowercase, digits, _ -)" maxlength="32" autocomplete="off" spellcheck="false">
+    <div class="voiceCloneLane">
+      <input type="file" id="voiceCloneFile" accept=".wav,.aiff,.aif,.flac,.ogg,.mp3">
+      <button type="button" class="panelBtn" id="voiceCloneUploadFileBtn">Upload file</button>
+    </div>
+    <div class="voiceCloneLane">
+      <button type="button" class="panelBtn" id="voiceCloneRecordBtn" aria-pressed="false">🎙️ Record</button>
+      <span id="voiceCloneRecSeconds" aria-hidden="true">0.0s</span>
+      <button type="button" class="panelBtn" id="voiceCloneUploadRecBtn">Upload recording</button>
+    </div>
+    <div class="hint">10–30 seconds of clean speech — background noise becomes part of the voice. Recording auto-stops at 30s (the server truncates to 30s too).</div>
+    <div id="voiceCloneStatus" role="status" aria-live="polite"></div>
+  </details>
   <button class="panelBtn primary" id="applyPersonaBtn">Apply</button>
   <button class="panelBtn" id="resetChatBtn">Reset chat</button>
   <button class="panelBtn" id="reloadToolsBtn">Reload tools</button>
@@ -1454,6 +1529,15 @@ const WS_URL = window.location.protocol === "https:" ? `wss://${window.location.
 const TARGET_RATE = 16000;
 const TAIL_SILENCE_SEC = 1.0; // ~1s of int16 zeros to trip server-side VAD end-of-turn
 
+// Mirrors patches/voice_clone.py caps/lists exactly (server is authoritative; these are
+// only for instant client-side feedback before a round trip).
+const VOICE_CLONE_MAX_BYTES = 25 * 1024 * 1024;
+const VOICE_CLONE_MAX_CHUNK_BYTES = 512 * 1024;
+const VOICE_CLONE_ACCEPTED_EXT = [".wav", ".aiff", ".aif", ".flac", ".ogg", ".mp3"];
+const VOICE_CLONE_REJECTED_EXT = [".webm", ".m4a", ".mp4"];
+const VOICE_CLONE_NAME_RE = /^[a-z0-9_-]{1,32}$/;
+const VOICE_CLONE_MAX_SEC = 30;
+
 // ── DOM ──────────────────────────────────────────────────────────────
 const els = {
   dot: document.getElementById("dot"),
@@ -1488,6 +1572,15 @@ const els = {
   wakeWordBlock: document.getElementById("wakeWordBlock"),
   wakeToggle: document.getElementById("wakeToggle"),
   wakeModelSelect: document.getElementById("wakeModelSelect"),
+  voiceCloneAdvanced: document.getElementById("voiceCloneAdvanced"),
+  voiceCloneList: document.getElementById("voiceCloneList"),
+  voiceCloneName: document.getElementById("voiceCloneName"),
+  voiceCloneFile: document.getElementById("voiceCloneFile"),
+  voiceCloneUploadFileBtn: document.getElementById("voiceCloneUploadFileBtn"),
+  voiceCloneRecordBtn: document.getElementById("voiceCloneRecordBtn"),
+  voiceCloneRecSeconds: document.getElementById("voiceCloneRecSeconds"),
+  voiceCloneUploadRecBtn: document.getElementById("voiceCloneUploadRecBtn"),
+  voiceCloneStatus: document.getElementById("voiceCloneStatus"),
   avatarSelect: document.getElementById("avatarSelect"),
   applyPersonaBtn: document.getElementById("applyPersonaBtn"),
   resetChatBtn: document.getElementById("resetChatBtn"),
@@ -2042,6 +2135,387 @@ els.personaDeleteBtn.addEventListener("click", () => {
 });
 populatePersonaSelect();
 
+// ── Custom voice cloning ────────────────────────────────────────────────
+// Protocol: docs/plans/custom-voice-cloning-v1.3.md (rulings 5, 6, 9, 10, 11) +
+// patches/voice_clone.py + patches/brain_control.py + patches/websocket_streamer.py.
+let lastPredefinedVoices = [];
+let lastCustomVoices = [];
+let voiceCloneBusy = false;      // true while an upload (file or recording) is in flight
+let pendingVoiceDeleteName = null; // set right before sending config_set{voice_delete}, so the
+                                    // matching config_ack (ok or error) can be routed to this UI
+                                    // rather than just the generic diagnostics log.
+
+function setVoiceCloneStatus(text, isError) {
+  els.voiceCloneStatus.textContent = text || "";
+  els.voiceCloneStatus.classList.toggle("voiceCloneError", !!isError);
+}
+
+function setVoiceCloneBusyUI(busy) {
+  voiceCloneBusy = busy;
+  els.voiceCloneUploadFileBtn.disabled = busy;
+  els.voiceCloneUploadRecBtn.disabled = busy;
+  els.voiceCloneRecordBtn.disabled = busy;
+}
+
+// Ruling 11: one dropdown, predefined + custom, custom entries suffixed "· custom" but
+// sending the bare name on change (existing config_set{voice} path, untouched below).
+// Called from both config_state (carries `voices`+`custom_voices`) and config_ack (carries
+// only `custom_voices` — the cached predefined list fills the gap) so the dropdown updates
+// on every frame that carries either list, per spec.
+function renderVoiceDropdown(activeVoice) {
+  const hasVoices = lastPredefinedVoices.length > 0 || lastCustomVoices.length > 0;
+  if (!hasVoices || document.activeElement === els.voiceSelect) return; // don't clobber while focused
+  els.voiceSelect.innerHTML = "";
+  lastPredefinedVoices.forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    opt.selected = name === activeVoice;
+    els.voiceSelect.appendChild(opt);
+  });
+  lastCustomVoices.forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name; // bare name — server resolves custom names itself (ruling 11)
+    opt.textContent = name + " · custom";
+    opt.selected = name === activeVoice;
+    els.voiceSelect.appendChild(opt);
+  });
+}
+
+// Ruling 10: delete affordance per custom voice.
+function renderCustomVoiceList() {
+  els.voiceCloneList.innerHTML = "";
+  if (lastCustomVoices.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "voiceCloneEmpty";
+    empty.textContent = "No custom voices yet.";
+    els.voiceCloneList.appendChild(empty);
+    return;
+  }
+  lastCustomVoices.forEach((name) => {
+    const row = document.createElement("div");
+    row.className = "voiceCloneRow";
+    const label = document.createElement("span");
+    label.textContent = name;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "voiceCloneDeleteBtn";
+    del.textContent = "Delete";
+    del.setAttribute("aria-label", "Delete voice " + name);
+    del.addEventListener("click", () => {
+      if (!confirm(`Delete custom voice "${name}"? This can't be undone.`)) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      pendingVoiceDeleteName = name;
+      ws.send(JSON.stringify({ type: "config_set", voice_delete: name }));
+    });
+    row.appendChild(label);
+    row.appendChild(del);
+    els.voiceCloneList.appendChild(row);
+  });
+}
+
+function validateVoiceCloneName(name) {
+  if (!name) return { ok: false, error: "enter a name" };
+  if (!VOICE_CLONE_NAME_RE.test(name)) {
+    return { ok: false, error: "invalid name: use lowercase letters, digits, underscore, hyphen (1-32 chars)" };
+  }
+  if (lastPredefinedVoices.includes(name)) return { ok: false, error: "name taken by a built-in voice" };
+  return { ok: true };
+}
+
+function validateVoiceCloneExt(filename) {
+  const m = /\.[^.]+$/.exec(filename || "");
+  const ext = m ? m[0].toLowerCase() : "";
+  if (!ext) return { ok: false, error: "missing file extension" };
+  if (VOICE_CLONE_ACCEPTED_EXT.includes(ext)) return { ok: true, ext };
+  if (VOICE_CLONE_REJECTED_EXT.includes(ext)) return { ok: false, error: `${ext} isn't supported — convert to WAV/MP3 first` };
+  return { ok: false, error: `unsupported file extension: ${ext}` };
+}
+
+// bytes.length-chunked to dodge String.fromCharCode.apply's call-stack limit on large files.
+function voiceCloneBytesToBase64(bytes) {
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + step, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+// One-at-a-time FIFO of voice_clone_progress/voice_clone_result frames (and, per the
+// defensive-exception case, a synthesized frame from an unexpected config_ack{ok:false} —
+// see the config_ack handler in handleEvent). Only one upload is ever in flight per the
+// protocol ("single in-flight upload per client"), so a plain queue is enough to let
+// performVoiceClone() `await` its way through begin -> chunks -> end -> building -> result
+// without racing frames that arrive between awaits.
+let voiceCloneFrameQueue = [];
+let voiceCloneFrameResolve = null;
+function pushVoiceCloneFrame(ev) {
+  if (voiceCloneFrameResolve) {
+    const resolve = voiceCloneFrameResolve;
+    voiceCloneFrameResolve = null;
+    resolve(ev);
+  } else {
+    voiceCloneFrameQueue.push(ev);
+  }
+}
+function nextVoiceCloneFrame() {
+  if (voiceCloneFrameQueue.length) return Promise.resolve(voiceCloneFrameQueue.shift());
+  return new Promise((resolve) => { voiceCloneFrameResolve = resolve; });
+}
+
+// Ruling 4/protocol: voice_clone_begin -> voice_clone_chunk* -> voice_clone_end, driven by
+// the server's replies. `ext` is "wav" for recordings (ruling 6) or the picked file's
+// extension. `bytes` is a Uint8Array of the raw (already-normalized-by-server-side) payload.
+async function performVoiceClone(name, ext, bytes) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { setVoiceCloneStatus("not connected", true); return; }
+  voiceCloneFrameQueue = [];
+  voiceCloneFrameResolve = null;
+  setVoiceCloneBusyUI(true);
+  setVoiceCloneStatus("uploading… 0%");
+  try {
+    ws.send(JSON.stringify({ type: "voice_clone_begin", name, ext, size: bytes.length }));
+    let frame = await nextVoiceCloneFrame();
+    if (frame.type !== "voice_clone_progress") {
+      // begin rejected: bad name/ext/size, or the cloning gate is off — error text is
+      // server-authored and user-appropriate, display verbatim.
+      setVoiceCloneStatus(frame.error || "upload rejected", true);
+      return;
+    }
+    for (let offset = 0; offset < bytes.length; offset += VOICE_CLONE_MAX_CHUNK_BYTES) {
+      if (voiceCloneFrameQueue.length) {
+        // A chunk error can arrive mid-loop (chunks get no ack on success, only on
+        // failure) — bail out immediately instead of blasting the rest pointlessly.
+        const errFrame = voiceCloneFrameQueue.shift();
+        setVoiceCloneStatus(errFrame.error || "upload failed", true);
+        return;
+      }
+      const slice = bytes.subarray(offset, Math.min(offset + VOICE_CLONE_MAX_CHUNK_BYTES, bytes.length));
+      ws.send(JSON.stringify({ type: "voice_clone_chunk", data: voiceCloneBytesToBase64(slice) }));
+      const pct = Math.round((Math.min(offset + slice.length, bytes.length) / bytes.length) * 100);
+      setVoiceCloneStatus(`uploading… ${pct}%`);
+      // Yield so queued WS message events (an out-of-band chunk error) and the status
+      // repaint can actually run, and wait out backpressure on slow links (phone over
+      // wss is the primary path) instead of letting bufferedAmount balloon unboundedly.
+      await new Promise((r) => setTimeout(r, 0));
+      while (ws.bufferedAmount > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 50));
+    }
+    ws.send(JSON.stringify({ type: "voice_clone_end" }));
+    frame = await nextVoiceCloneFrame(); // expected: progress{stage:"building"}, or an error result
+    if (frame.type === "voice_clone_result") {
+      setVoiceCloneStatus(frame.ok ? `"${frame.name}" ready` : (frame.error || "upload failed"), !frame.ok);
+      return;
+    }
+    setVoiceCloneStatus("building voice… (a few seconds)");
+    frame = await nextVoiceCloneFrame(); // final voice_clone_result
+    if (frame.ok) {
+      setVoiceCloneStatus(`"${frame.name}" ready — switched and auditioning aloud`);
+      // Dropdown/list refresh comes from the server's config_state broadcast on success
+      // (renderConfigState), not from here.
+    } else {
+      setVoiceCloneStatus(frame.error || "voice build failed", true);
+    }
+  } finally {
+    setVoiceCloneBusyUI(false);
+  }
+}
+
+els.voiceCloneUploadFileBtn.addEventListener("click", async () => {
+  if (voiceCloneBusy) return;
+  const file = els.voiceCloneFile.files && els.voiceCloneFile.files[0];
+  if (!file) { setVoiceCloneStatus("choose a file first", true); return; }
+  const nameCheck = validateVoiceCloneName(els.voiceCloneName.value.trim());
+  if (!nameCheck.ok) { setVoiceCloneStatus(nameCheck.error, true); return; }
+  const extCheck = validateVoiceCloneExt(file.name);
+  if (!extCheck.ok) { setVoiceCloneStatus(extCheck.error, true); return; }
+  if (file.size <= 0 || file.size > VOICE_CLONE_MAX_BYTES) {
+    setVoiceCloneStatus(`upload exceeds the ${VOICE_CLONE_MAX_BYTES / (1024 * 1024)} MB cap`, true);
+    return;
+  }
+  const name = els.voiceCloneName.value.trim();
+  if (lastCustomVoices.includes(name) && !confirm(`Overwrite custom voice "${name}"?`)) return;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  performVoiceClone(name, extCheck.ext, bytes);
+});
+
+// ── Record lane (ruling 6) ───────────────────────────────────────────────
+// Raw PCM -> WAV client-side, never MediaRecorder (MediaRecorder emits webm/mp4, both
+// undecodable server-side). Captures at the AudioContext's NATIVE sample rate — no
+// forced sampleRate, no decimation. Deliberately a separate, simpler AudioWorklet from
+// the mic-capture 'cap' processor above (index.html:~2723): that one box-average-decimates
+// to 16k for the live pipeline, which is exactly what ruling 6 says not to reuse here.
+const VOICE_CLONE_WORKLET_SRC = `
+class VoiceCloneCap extends AudioWorkletProcessor {
+  process(inputs) {
+    const chans = inputs[0];
+    if (!chans || !chans.length || !chans[0].length) return true;
+    const n = chans[0].length;
+    if (chans.length === 1) {
+      this.port.postMessage(chans[0].slice(0));
+      return true;
+    }
+    const out = new Float32Array(n);
+    for (let c = 0; c < chans.length; c++) {
+      const ch = chans[c];
+      for (let i = 0; i < n; i++) out[i] += ch[i] / chans.length;
+    }
+    this.port.postMessage(out);
+    return true;
+  }
+}
+registerProcessor('voice-clone-cap', VoiceCloneCap);
+`;
+
+let voiceCloneRecStream = null;
+let voiceCloneRecCtx = null;
+let voiceCloneRecNode = null;
+let voiceCloneRecChunks = [];
+let voiceCloneRecSamples = 0;
+let voiceCloneRecording = false;
+let voiceCloneRecordedWav = null; // Uint8Array, set once a recording finishes
+
+function teardownVoiceCloneRecording() {
+  try { if (voiceCloneRecNode) voiceCloneRecNode.disconnect(); } catch {}
+  try { if (voiceCloneRecStream) voiceCloneRecStream.getTracks().forEach((t) => t.stop()); } catch {}
+  try { if (voiceCloneRecCtx) voiceCloneRecCtx.close(); } catch {}
+  voiceCloneRecNode = null;
+  voiceCloneRecStream = null;
+  voiceCloneRecCtx = null;
+}
+
+// RIFF/WAVE header + 16-bit PCM mono samples (channel averaging already happened in the
+// worklet above, so this only clamps/quantizes float -> int16).
+function encodeWavMono16(samples, sampleRate) {
+  const dataSize = samples.length * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);       // PCM fmt chunk size
+  view.setUint16(20, 1, true);        // audio format = PCM
+  view.setUint16(22, 1, true);        // channels = 1 (mono)
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
+  view.setUint16(32, 2, true);        // block align (mono, 16-bit)
+  view.setUint16(34, 16, true);       // bits per sample
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Uint8Array(buffer);
+}
+
+async function startVoiceCloneRecording() {
+  if (voiceCloneRecording || voiceCloneBusy) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setVoiceCloneStatus("microphone recording isn't supported in this browser", true);
+    return;
+  }
+  els.voiceCloneRecordBtn.disabled = true;
+  els.voiceCloneRecordBtn.textContent = "🎙️ Starting…";
+  try {
+    voiceCloneRecStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    els.voiceCloneRecordBtn.disabled = false;
+    els.voiceCloneRecordBtn.textContent = "🎙️ Record";
+    setVoiceCloneStatus("microphone permission denied", true);
+    return;
+  }
+
+  try {
+    voiceCloneRecCtx = new (window.AudioContext || window.webkitAudioContext)(); // native rate — no decimation
+  } catch (e) {
+    teardownVoiceCloneRecording();
+    els.voiceCloneRecordBtn.disabled = false;
+    els.voiceCloneRecordBtn.textContent = "🎙️ Record";
+    setVoiceCloneStatus("couldn't start audio capture: " + e.message, true);
+    return;
+  }
+  if (voiceCloneRecCtx.state === "suspended") await voiceCloneRecCtx.resume();
+
+  const src = voiceCloneRecCtx.createMediaStreamSource(voiceCloneRecStream);
+  const blobUrl = URL.createObjectURL(new Blob([VOICE_CLONE_WORKLET_SRC], { type: "application/javascript" }));
+  try {
+    await voiceCloneRecCtx.audioWorklet.addModule(blobUrl);
+  } catch (e) {
+    URL.revokeObjectURL(blobUrl);
+    teardownVoiceCloneRecording();
+    els.voiceCloneRecordBtn.disabled = false;
+    els.voiceCloneRecordBtn.textContent = "🎙️ Record";
+    setVoiceCloneStatus("couldn't load recorder: " + e.message, true);
+    return;
+  }
+  URL.revokeObjectURL(blobUrl);
+
+  voiceCloneRecChunks = [];
+  voiceCloneRecSamples = 0;
+  voiceCloneRecordedWav = null; // a new recording invalidates any previous take
+  els.voiceCloneRecSeconds.textContent = "0.0s";
+  voiceCloneRecNode = new AudioWorkletNode(voiceCloneRecCtx, "voice-clone-cap");
+  voiceCloneRecNode.port.onmessage = (e) => {
+    const chunk = e.data; // Float32Array, native rate, mono
+    voiceCloneRecChunks.push(chunk);
+    voiceCloneRecSamples += chunk.length;
+    const elapsed = voiceCloneRecSamples / voiceCloneRecCtx.sampleRate;
+    els.voiceCloneRecSeconds.textContent = elapsed.toFixed(1) + "s";
+    if (elapsed >= VOICE_CLONE_MAX_SEC) stopVoiceCloneRecording();
+  };
+  src.connect(voiceCloneRecNode);
+  const sink = voiceCloneRecCtx.createGain();
+  sink.gain.value = 0;
+  voiceCloneRecNode.connect(sink);
+  sink.connect(voiceCloneRecCtx.destination);
+
+  voiceCloneRecording = true;
+  els.voiceCloneRecordBtn.disabled = false;
+  els.voiceCloneRecordBtn.setAttribute("aria-pressed", "true");
+  els.voiceCloneRecordBtn.textContent = "⏹ Stop";
+  setVoiceCloneStatus("recording… (auto-stops at 30s)");
+}
+
+function stopVoiceCloneRecording() {
+  if (!voiceCloneRecording) return;
+  voiceCloneRecording = false;
+  els.voiceCloneRecordBtn.setAttribute("aria-pressed", "false");
+  els.voiceCloneRecordBtn.textContent = "🎙️ Record";
+  const sampleRate = voiceCloneRecCtx ? voiceCloneRecCtx.sampleRate : 48000;
+  teardownVoiceCloneRecording();
+  if (voiceCloneRecSamples === 0) { setVoiceCloneStatus("no audio captured", true); return; }
+  const combined = new Float32Array(voiceCloneRecSamples);
+  let off = 0;
+  for (const c of voiceCloneRecChunks) { combined.set(c, off); off += c.length; }
+  voiceCloneRecChunks = [];
+  voiceCloneRecordedWav = encodeWavMono16(combined, sampleRate);
+  setVoiceCloneStatus(`recorded ${(voiceCloneRecSamples / sampleRate).toFixed(1)}s — enter a name and upload the recording`);
+}
+
+els.voiceCloneRecordBtn.addEventListener("click", () => {
+  if (voiceCloneRecording) stopVoiceCloneRecording();
+  else startVoiceCloneRecording();
+});
+
+els.voiceCloneUploadRecBtn.addEventListener("click", () => {
+  if (voiceCloneBusy) return;
+  if (!voiceCloneRecordedWav) { setVoiceCloneStatus("record something first", true); return; }
+  const nameCheck = validateVoiceCloneName(els.voiceCloneName.value.trim());
+  if (!nameCheck.ok) { setVoiceCloneStatus(nameCheck.error, true); return; }
+  if (voiceCloneRecordedWav.length > VOICE_CLONE_MAX_BYTES) {
+    setVoiceCloneStatus(`upload exceeds the ${VOICE_CLONE_MAX_BYTES / (1024 * 1024)} MB cap`, true);
+    return;
+  }
+  const name = els.voiceCloneName.value.trim();
+  if (lastCustomVoices.includes(name) && !confirm(`Overwrite custom voice "${name}"?`)) return;
+  performVoiceClone(name, "wav", voiceCloneRecordedWav);
+});
+
 function renderConfigState(ev) {
   const active = ev.brains.find((b) => b.name === ev.active_brain);
   els.brainStatus.textContent = `Active: ${active ? active.label : ev.active_brain}`;
@@ -2092,20 +2566,16 @@ function renderConfigState(ev) {
       : "Leave empty to restore default persona";
   }
 
-  const voices = ev.voices || [];
-  const hasVoices = voices.length > 0;
+  lastPredefinedVoices = ev.voices || [];
+  if (Array.isArray(ev.custom_voices)) lastCustomVoices = ev.custom_voices;
+  const hasVoices = lastPredefinedVoices.length > 0;
   els.voiceLabel.hidden = !hasVoices;
   els.voiceSelect.hidden = !hasVoices;
-  if (hasVoices && document.activeElement !== els.voiceSelect) {
-    els.voiceSelect.innerHTML = "";
-    voices.forEach((name) => {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      opt.selected = name === ev.voice;
-      els.voiceSelect.appendChild(opt);
-    });
-  }
+  // Same hidden-when-unavailable convention as the wake-word block: only config_state
+  // (not config_ack, which lacks `voices`) carries the tts-handler-present signal.
+  els.voiceCloneAdvanced.hidden = !hasVoices;
+  renderVoiceDropdown(ev.voice);
+  renderCustomVoiceList();
 
   const wakeWord = ev.wake_word;
   const hasWakeWord = !!wakeWord;
@@ -2463,6 +2933,10 @@ function handleEvent(text) {
     case "search_links":
       renderSearchLinks(ev);
       break;
+    case "voice_clone_progress":
+    case "voice_clone_result":
+      pushVoiceCloneFrame(ev);
+      break;
     case "config_ack":
       if (ev.permission_respond) {
         const pr = ev.permission_respond;
@@ -2479,11 +2953,33 @@ function handleEvent(text) {
         if (typeof ev.tools_armed === "number" && els.sessionTools) {
           els.sessionTools.textContent = ev.tools_armed + " armed";
         }
+        if (Array.isArray(ev.custom_voices)) {
+          // config_ack carries `custom_voices` but not `voices` (predefined) — merge
+          // against the cached predefined list so the dropdown/list update immediately
+          // instead of waiting for the config_get resync below.
+          lastCustomVoices = ev.custom_voices;
+          renderVoiceDropdown(ev.voice);
+          renderCustomVoiceList();
+        }
+        if (pendingVoiceDeleteName) {
+          setVoiceCloneStatus(`deleted "${pendingVoiceDeleteName}"`);
+          pendingVoiceDeleteName = null;
+        }
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "config_get" })); // resync panel (brain/persona/reset all land here)
         }
       } else {
         log("config_set failed: " + ev.error);
+        if (pendingVoiceDeleteName) {
+          setVoiceCloneStatus(`couldn't delete "${pendingVoiceDeleteName}": ${ev.error}`, true);
+          pendingVoiceDeleteName = null;
+        } else if (voiceCloneBusy) {
+          // Defensive: an unexpected server-side exception during voice_clone_begin/end
+          // surfaces as config_ack{ok:false} instead of voice_clone_result (BrainControl's
+          // outer try/except). Route it into the same queue so performVoiceClone()'s
+          // pending await resolves instead of hanging, and the upload UI resets.
+          pushVoiceCloneFrame({ type: "voice_clone_result", ok: false, name: null, error: ev.error });
+        }
       }
       break;
     default:

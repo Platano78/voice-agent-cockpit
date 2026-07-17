@@ -139,6 +139,8 @@ them.
 | `QMD_MCP_URL` | `http://localhost:8070/mcp` | optional QMD knowledge endpoint (voice tools) |
 | `VOICE_TOOLS` | *(unset)* | pin the armed voice-tool set to a comma-separated list |
 | `VOICE_TOOLS_DIR` | *(unset)* | directory of drop-in local voice tools (one `.py` per tool) |
+| `VOICE_CLONE_DIR` | `~/speech-to-speech/voices` | where custom (cloned) voice states are stored |
+| `VOICE_AUDITION_TEXT` | `Hi, I'm {name}. This is how I sound.` | sample spoken after a voice switch; `off` disables |
 
 ## Voice tools
 
@@ -178,6 +180,41 @@ list); a broken file is skipped with a logged warning rather than crashing the
 pipeline. No restart needed to pick up changes — the settings panel's
 "Reload tools" button re-probes and re-arms live (also
 `{"type":"config_set", "reload_tools":true}` over the WS).
+
+## Custom voices (voice cloning)
+
+The settings panel's **Advanced — custom voice** section lets you add your own
+voices to the dropdown: record 10–30 seconds of speech in the browser, or
+upload a clip (`.wav`, `.aiff`, `.flac`, `.ogg`, `.mp3` — not `.webm`/`.m4a`;
+convert those first). The server builds a pocket-tts voice state from it once
+(a few seconds of CPU), stores it under `VOICE_CLONE_DIR`
+(default `~/speech-to-speech/voices/`, safe across framework reinstalls), and
+the voice appears in the dropdown on every connected client. Switching voices
+speaks a short audition sample so you hear the result immediately
+(`VOICE_AUDITION_TEXT`, set to `off` to disable). Clips longer than 30 seconds
+are truncated to the first 30. Clean audio matters: background noise, echo,
+and compression artifacts become part of the cloned voice, so record somewhere
+quiet (Kyutai recommends cleaning the sample first — e.g. Adobe's free
+[Enhance Speech](https://podcast.adobe.com/en/enhance)).
+
+**One-time setup** — pocket-tts ships its clone-capable weights behind a
+Hugging Face terms gate. Until you complete this, the cockpit shows a
+friendly error instead of building voices (already-built custom voices keep
+working regardless):
+
+1. Accept the terms at <https://huggingface.co/kyutai/pocket-tts>
+   (any HF account; approval is automatic).
+2. On the box that runs the pipeline, log that account in as the service
+   user: `hf auth login` (or place a token at `~/.cache/huggingface/token`).
+3. Restart the pipeline service — it re-downloads the model weights with
+   cloning enabled (~220 MB, one time).
+
+`soundfile` must be installed in the pipeline's venv for non-WAV uploads and
+recording normalization: `pip install soundfile`.
+
+**Consent notice**: pocket-tts's license prohibits "voice impersonation or
+cloning without explicit and lawful consent." Clone only voices you have the
+right to clone — your own, or a consenting speaker's.
 
 ## Attribution & acknowledgments
 
