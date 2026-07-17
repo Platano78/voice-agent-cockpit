@@ -23,6 +23,7 @@ fi
 
 echo "Applying patches into: $PKG"
 cp "$SCRIPT_DIR/brain_control.py" "$PKG/brain_control.py"
+cp "$SCRIPT_DIR/voice_clone.py" "$PKG/voice_clone.py"
 cp "$SCRIPT_DIR/websocket_streamer.py" "$PKG/connections/websocket_streamer.py"
 cp "$SCRIPT_DIR/s2s_pipeline.py" "$PKG/s2s_pipeline.py"
 cp "$SCRIPT_DIR/lm_output_processor.py" "$PKG/LLM/lm_output_processor.py"
