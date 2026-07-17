@@ -46,8 +46,11 @@ you at install time.
 Every connected browser is a window onto the **same** session: one chat
 history, one brain, one voice. Start a conversation at the desk, continue it
 from the phone — that continuity is deliberate. Events are broadcast live to
-whoever is connected at that moment (there is no history replay on join, so a
-device that reconnects only shows what happened after it joined).
+whoever is connected at that moment; a device that reconnects (screen lock,
+backgrounded tab, reload) also gets the last N completed turns replayed into
+its history rail, so it doesn't come back to an empty one. That replay buffer
+lives in server memory only (cleared on restart) — see `patches/README.md`
+for the `VOICE_HISTORY_REPLAY`/`VOICE_HISTORY_REPLAY_TURNS` env vars.
 
 If you want genuinely separate conversations per device, don't look for a
 toggle — run a **second pipeline instance** on another port (`--ws_port 8766`

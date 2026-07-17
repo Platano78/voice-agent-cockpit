@@ -3106,6 +3106,23 @@ function handleEvent(text) {
       }
       break;
     }
+    case "history_replay":
+      // A WS reconnect WITHOUT a page reload keeps conversationHistory alive in JS —
+      // the client already has these turns, so only apply on a truly empty rail
+      // (fresh page load / lost JS state). This one guard covers both cases with
+      // no dedup logic needed.
+      if (conversationHistory.length === 0 && Array.isArray(ev.entries)) {
+        ev.entries.forEach((entry) => {
+          conversationHistory.unshift({
+            time: new Date(entry.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            user: entry.user,
+            assistant: entry.assistant,
+          });
+        });
+        if (conversationHistory.length > HISTORY_CAP) conversationHistory.length = HISTORY_CAP;
+        renderHistory();
+      }
+      break;
     case "partial_transcription":
       // live partials: show in transcript as it grows
       if (ev.delta) els.transcript.textContent = (els.transcript.textContent === "—" ? "" : els.transcript.textContent) + ev.delta;

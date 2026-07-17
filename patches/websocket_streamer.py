@@ -17,6 +17,7 @@ from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessag
 from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
+from speech_to_speech.transcript_buffer import TranscriptBuffer
 from speech_to_speech.turn_stats import turn_stats
 from speech_to_speech.voice_clone import UploadManager
 from speech_to_speech.wakeword_gate import WakewordGate
@@ -86,6 +87,10 @@ class WebSocketStreamer:
         # (validation) and `voice_clone_end` (assembled bytes + the actual
         # build) reach `control_callback`. See patches/README.md.
         self._voice_uploads = UploadManager()
+        # Transcript replay: last N completed turns, replayed to a joining
+        # client so a reconnect (screen lock, backgrounded tab, reload)
+        # doesn't show an empty history rail. See patches/README.md.
+        self._transcript_buffer = TranscriptBuffer()
 
     def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
@@ -185,6 +190,15 @@ class WebSocketStreamer:
                     )
                 except Exception:
                     logger.debug("Client %s: wakeword asleep notice failed", client_id, exc_info=True)
+
+        # Seed this joining client's history rail with the last N completed
+        # turns (best-effort -- a send failure here can't break the join).
+        replay = self._transcript_buffer.replay_payload()
+        if replay is not None:
+            try:
+                await websocket.send(json.dumps(replay))
+            except Exception:
+                logger.debug("Client %s: history replay send failed", client_id, exc_info=True)
 
         try:
             logger.debug(f"Client {client_id}: Starting message receive loop")
@@ -487,6 +501,7 @@ class WebSocketStreamer:
                         if self.clients:
                             if isinstance(text_message, PipelineEvent):
                                 payload = text_message.model_dump()
+                                self._transcript_buffer.feed(payload, time.time())
                                 await asyncio.gather(
                                     *[client.send(json.dumps(payload)) for client in self.clients],
                                     return_exceptions=True,

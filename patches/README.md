@@ -252,6 +252,29 @@ kept as an instant rollback (see below).
   dispatch-table entry is no longer `required` (that auto-refusal would
   otherwise fire before the runner's fallback ever runs).
 
+- `transcript_buffer.py` (new) — `speech_to_speech/transcript_buffer.py`.
+  Server-side history replay: a browser that reconnects (phone screen lock,
+  backgrounded tab, reload) used to see an empty history rail even though
+  another connected screen had the whole conversation (see "One
+  conversation, many screens" in the top-level README). `TranscriptBuffer`
+  mirrors the webclient's own `transcription_completed` /
+  `assistant_text` pairing logic one event behind, keeping the last N
+  completed turns (`{"user", "assistant", "ts"}`) in a
+  `collections.deque(maxlen=N)` — held in server memory only, cleared on
+  restart. `websocket_streamer.py`'s `_send_loop` feeds it every broadcast
+  text payload right before the fan-out; `_handle_client` sends the buffer's
+  `history_replay` frame to a newly-joined client only (not broadcast) right
+  after it's added to `self.clients`, best-effort. Both run in the
+  streamer's single asyncio event loop thread, so no lock is needed.
+  `VOICE_HISTORY_REPLAY=off` (case-insensitive) disables the feature
+  entirely; `VOICE_HISTORY_REPLAY_TURNS` sets N (default 50, matching the
+  webclient's own `HISTORY_CAP`). On the client, `webclient/index.html`
+  applies a `history_replay` frame only when `conversationHistory` is
+  empty (fresh load / lost JS state) — a WS reconnect without a page
+  reload already has the turns in memory, so this avoids duplicating them.
+  Dependency-light like `voice_rules.py`/`phone_context.py` (no
+  `speech_to_speech` import), importable/testable standalone.
+
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
 - `$HOME/speech-to-speech/brains.json` — brain registry (label,
