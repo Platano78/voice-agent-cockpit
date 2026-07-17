@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from speech_to_speech import phone_context
+
 logger = logging.getLogger(__name__)
 
 _MAX_RESULT_CHARS = 600
@@ -89,18 +91,22 @@ TOOL_DEFS: list[dict] = [
         "name": "get_weather",
         "description": (
             "Get the current weather for a place. Use when the user asks about "
-            "weather, temperature, or conditions somewhere. Answer in 1-2 spoken "
-            "sentences."
+            "weather, temperature, or conditions somewhere. If the user shares "
+            "their location, place may be omitted to use it. Answer in 1-2 "
+            "spoken sentences."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "place": {
                     "type": "string",
-                    "description": "City or place name, e.g. 'Tokyo' or 'Paris, France'.",
+                    "description": (
+                        "City or place name, e.g. 'Tokyo' or 'Paris, France'. "
+                        "Optional if the user's location is known."
+                    ),
                 }
             },
-            "required": ["place"],
+            "required": [],
         },
     },
     {
@@ -410,22 +416,36 @@ def _truncate(text: str) -> str:
     return text[: _MAX_RESULT_CHARS - 1].rstrip() + "…"
 
 
-def _run_get_weather(place: str) -> str:
+# Kept as a shared constant so the runner's own fallback refusal (when
+# neither an explicit place nor phone_context has a location) matches the
+# generic "I need {arg_label}." wording execute() would otherwise have used
+# before required=False moved that decision into the runner.
+_WEATHER_PLACE_ARG_LABEL = "a place name for the weather"
+
+
+def _run_get_weather(place: str | None) -> str:
     with httpx.Client(timeout=_WEATHER_TIMEOUT_S) as client:
-        geo = client.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": place, "count": 1},
-        )
-        geo.raise_for_status()
-        results = geo.json().get("results") or []
-        if not results:
-            return f"I couldn't find a place called {place!r}."
-        hit = results[0]
-        lat, lon = hit["latitude"], hit["longitude"]
-        label = hit.get("name", place)
-        country = hit.get("country")
-        if country:
-            label = f"{label}, {country}"
+        if place:
+            geo = client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": place, "count": 1},
+            )
+            geo.raise_for_status()
+            results = geo.json().get("results") or []
+            if not results:
+                return f"I couldn't find a place called {place!r}."
+            hit = results[0]
+            lat, lon = hit["latitude"], hit["longitude"]
+            label = hit.get("name", place)
+            country = hit.get("country")
+            if country:
+                label = f"{label}, {country}"
+        else:
+            loc = phone_context.location()
+            if loc is None:
+                return f"I need {_WEATHER_PLACE_ARG_LABEL}."
+            lat, lon = loc
+            label = "your location"
 
         fc = client.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -574,7 +594,7 @@ def _run_send_to_hermes(message: str) -> str:
 # that arg, spoken label for the tool itself, required: whether a missing arg
 # should be refused ("I need ...") rather than passed through as None)
 _DISPATCH = {
-    "get_weather": (_run_get_weather, _WEATHER_TIMEOUT_S, "place", "a place name for the weather", "weather lookup", True),
+    "get_weather": (_run_get_weather, _WEATHER_TIMEOUT_S, "place", _WEATHER_PLACE_ARG_LABEL, "weather lookup", False),
     "web_search": (_run_web_search, _SEARCH_TIMEOUT_S, "query", "a search query", "web search", True),
     "knowledge_lookup": (
         _run_knowledge_lookup,

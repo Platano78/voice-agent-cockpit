@@ -193,9 +193,9 @@ kept as an instant rollback (see below).
   response that was 100% reasoning. `_iter_response_events` (non-streaming)
   runs the whole response's text through a one-shot `feed()` + `flush()`
   before yielding it, so both the `AssistantMessage` and `TextDelta` there
-  are filtered identically. `_serialize` also wraps its return in
-  `voice_rules.apply_system_rules` (see below) — the only other change to
-  this file.
+  are filtered identically. `_serialize` also wraps its return through
+  `voice_rules.apply_system_rules` then `phone_context.apply_ambient` (both
+  below) — the only other change to this file.
 
 - `voice_rules.py` (new) — `speech_to_speech/voice_rules.py`. Pipeline
   invariant, not a persona setting: probed regression is qwen3.6 in no-think
@@ -215,6 +215,42 @@ kept as an instant rollback (see below).
   idempotent (skips re-appending if the rules text is already present in
   the system content) and dependency-free (stdlib only, no
   `speech_to_speech` import), like `think_filter.py`.
+
+- `phone_context.py` (new) — `speech_to_speech/phone_context.py`. Ambient
+  phone context: the webclient (shipped separately) sends opt-in
+  `{"type":"phone_context", "lat":.., "lon":.., "accuracy":.., "tz":..,
+  "battery_pct":.., "charging":..}` text frames over the existing
+  WebSocket. Motivation: the model spun 14 tool rounds trying to guess the
+  user's location for an air-quality question — this makes location
+  ambient instead. `update(data)` validates each field independently
+  (type/range checks; an invalid field is dropped, not fatal to the rest of
+  the payload) and merges it onto a module-level last-known-state dict
+  under a `threading.Lock` (the WebSocket thread writes, the LLM thread
+  reads). `location(max_age_s=1800)` returns `(lat, lon)` or `None` if
+  stale/unset; `snapshot()` returns a copy for future tools/UI;
+  `ambient_line()` builds "The user's approximate location is {place};
+  their local time is {HH:MM} ({tz})." — `{place}` is reverse-geocoded via
+  Nominatim (`requests`, imported lazily inside the geocode helper only, so
+  the module itself stays dependency-free like `voice_rules.py`), cached
+  in-module by coords rounded to 3 decimals, and fails soft to "latitude
+  X, longitude Y" on any network error; the time clause is omitted
+  entirely if `tz` is unset or not a valid zoneinfo key. `apply_ambient()`
+  mirrors `voice_rules.apply_system_rules`'s copy-don't-mutate,
+  append-to-system-message contract and is wired into
+  `ChatCompletionsApiModelHandler._serialize` right after
+  `apply_system_rules`. `VOICE_PHONE_CONTEXT=off` (case-insensitive)
+  disables the whole feature: `update()` becomes a no-op and every reader
+  returns `None`, even for state stored before the toggle flipped.
+  `websocket_streamer.py` routes `type == "phone_context"` frames straight
+  to `update()` via `asyncio.to_thread` (fire-and-forget, no reply frame).
+  `voice_tools.py`'s `get_weather` tool gained an optional `place`: an
+  omitted/empty place now falls back to `phone_context.location()` and
+  skips geocoding (goes straight to the forecast call); if neither a place
+  nor a stored location is available, the runner returns the same "I need
+  a place name for the weather." wording `execute()`'s generic
+  missing-required-arg path used to produce, since `get_weather`'s
+  dispatch-table entry is no longer `required` (that auto-refusal would
+  otherwise fire before the runner's fallback ever runs).
 
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 

@@ -39,6 +39,7 @@ def _install_stubs():
             setattr(m, k, v)
         return m
 
+    from patches import phone_context as real_phone_context
     from patches import voice_clone as real_voice_clone
 
     pkg = mod("speech_to_speech")
@@ -60,6 +61,8 @@ def _install_stubs():
     mod("speech_to_speech.turn_stats", turn_stats=types.SimpleNamespace(mark=lambda *a, **kw: None))
     sys.modules["speech_to_speech.voice_clone"] = real_voice_clone
     pkg.voice_clone = real_voice_clone
+    sys.modules["speech_to_speech.phone_context"] = real_phone_context
+    pkg.phone_context = real_phone_context
 
     class _StubWakewordGate:
         def __init__(self):
