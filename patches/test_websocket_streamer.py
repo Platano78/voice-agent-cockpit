@@ -26,10 +26,17 @@ from queue import Queue
 
 def _install_stubs():
     def mod(name, **attrs):
-        m = types.ModuleType(name)
+        # Merge onto an existing sys.modules entry rather than replacing it:
+        # multiple test files stub the same speech_to_speech.* submodules,
+        # and pytest imports every test module before any test function
+        # runs -- a later file's stub would otherwise silently erase
+        # attributes an earlier file's LAZY (call-time) import still needs.
+        m = sys.modules.get(name)
+        if m is None:
+            m = types.ModuleType(name)
+            sys.modules[name] = m
         for k, v in attrs.items():
             setattr(m, k, v)
-        sys.modules[name] = m
         return m
 
     from patches import voice_clone as real_voice_clone

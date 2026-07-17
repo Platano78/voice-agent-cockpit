@@ -48,6 +48,45 @@ _MAX_STEPS = 30
 _STEP_TEXT_CHARS = 200
 _RESULT_CHARS = 400
 
+# Spoken completion announcement + quest-card auto-clear (see
+# _announce_completion/_schedule_reset).
+_ANNOUNCE_RESULT_CHARS = 300
+_RESET_DELAY_S = 90.0
+
+
+def _announce_enabled(raw: Optional[str] = None) -> bool:
+    """``VOICE_HERMES_ANNOUNCE`` parsing (mirrors
+    ``voice_clone.resolve_audition_text``'s off/default shape): unset/blank
+    -> enabled (default on); ``"off"`` (case-insensitive, stripped) ->
+    disabled; any other value -> enabled. ``raw`` is injectable for tests;
+    defaults to ``os.environ.get("VOICE_HERMES_ANNOUNCE")``."""
+    if raw is None:
+        raw = os.environ.get("VOICE_HERMES_ANNOUNCE")
+    if raw is None:
+        return True
+    stripped = raw.strip()
+    if not stripped:
+        return True
+    return stripped.lower() != "off"
+
+
+def _spoken_result(result: str) -> str:
+    """Whitespace-collapsed, ~300-char-capped form of a delegation result
+    for speech. A capped result gets an explanatory tail so the user knows
+    there's more (`status_summary`/`hermes_status` still has the full
+    `_RESULT_CHARS`-length text)."""
+    collapsed = " ".join((result or "").split())
+    if len(collapsed) <= _ANNOUNCE_RESULT_CHARS:
+        return collapsed
+    return collapsed[:_ANNOUNCE_RESULT_CHARS].rstrip() + " Ask me for the details if you want more."
+
+
+def _build_announcement(status: str, result: str) -> str:
+    spoken = _spoken_result(result)
+    if status == "error":
+        return f"Hermes hit a problem: {spoken}"
+    return f"Hermes is done. {spoken}"
+
 
 class DelegationState(BaseModel):
     active: bool = False
@@ -119,8 +158,12 @@ class HermesCockpit:
     runs one delegation at a time, and broadcasts a full state snapshot to
     every connected websocket client."""
 
-    def __init__(self, text_output_queue: Optional["Queue[Any]"] = None) -> None:
+    def __init__(self, text_output_queue: Optional["Queue[Any]"] = None, tts_queue: Any = None) -> None:
         self.text_output_queue = text_output_queue
+        # lm_processed_queue -- lets HermesCockpit speak a completion
+        # announcement (ruling 1). None-safe, same pattern as
+        # BrainControl.tts_queue: announcing is simply unavailable then.
+        self.tts_queue = tts_queue
         self.hermes_ok = True
         self._cursor = 0
         self._baseline_done = False
@@ -134,6 +177,11 @@ class HermesCockpit:
             "result": None,
             "steps": [],
         }
+        # Bumped each time delegate() starts a new task; the quest-card
+        # auto-clear timer compares against this (not started_ts floats) to
+        # tell whether it's still the delegation it was scheduled for.
+        self._delegation_generation = 0
+        self._reset_timer: Optional[threading.Timer] = None
         threading.Thread(target=self._poll_loop, name="hermes-cockpit-poll", daemon=True).start()
 
     # -- MCP client -------------------------------------------------------
@@ -252,6 +300,7 @@ class HermesCockpit:
                     "know when it's done before starting something new."
                 )
             short = task if len(task) <= 80 else task[:79].rstrip() + "..."
+            self._delegation_generation += 1
             self._delegation = {
                 "active": True,
                 "task": task,
@@ -301,7 +350,62 @@ class HermesCockpit:
             self._delegation["status"] = status
             self._delegation["result"] = result
             self._delegation["active"] = False
+            generation = self._delegation_generation
         self._append_step("system", f"{status}: {result}")
+        self._broadcast_state()
+        self._announce_completion(status, result)
+        self._schedule_reset(generation)
+
+    def _announce_completion(self, status: str, result: str) -> None:
+        """Speak the delegation outcome through the normal TTS path so a
+        finished (or failed) Hermes task is never silent -- previously it
+        only surfaced if the user noticed the quest card and asked. `None`
+        `turn_id`/`turn_revision` pass `SpeculativeTurnTracker`'s staleness
+        gate unconditionally, same seam as `BrainControl._audition`.
+        Best-effort: never raises; no-ops with no `tts_queue` wired or when
+        `VOICE_HERMES_ANNOUNCE=off`.
+
+        Known accepted gap: the announcement is spoken but not written into
+        LLM chat history, so a follow-up question still triggers the
+        `hermes_status` tool -- that's fine, not fixed here."""
+        if self.tts_queue is None or not _announce_enabled():
+            return
+        text = _build_announcement(status, result)
+        try:
+            from speech_to_speech.pipeline.messages import TTSInput
+
+            self.tts_queue.put(TTSInput(text=text, turn_id=None, turn_revision=None))
+        except Exception as e:
+            logger.warning("HermesCockpit: completion announcement failed: %s", e)
+
+    def _schedule_reset(self, generation: int) -> None:
+        """Auto-clear the quest card `_RESET_DELAY_S` after a delegation
+        finishes, unless a new delegation has started meanwhile (checked in
+        `_maybe_reset` via the generation counter, not `started_ts` floats).
+        Any previously pending timer is cancelled (best-effort) so resets
+        never stack."""
+        if self._reset_timer is not None:
+            try:
+                self._reset_timer.cancel()
+            except Exception:
+                pass
+        timer = threading.Timer(_RESET_DELAY_S, self._maybe_reset, args=(generation,))
+        timer.daemon = True
+        self._reset_timer = timer
+        timer.start()
+
+    def _maybe_reset(self, generation: int) -> None:
+        with self._delegation_lock:
+            if self._delegation_generation != generation or self._delegation["active"]:
+                return
+            self._delegation = {
+                "active": False,
+                "task": None,
+                "status": "idle",
+                "started_ts": None,
+                "result": None,
+                "steps": [],
+            }
         self._broadcast_state()
     # -- Permissions -----------------------------------------------------
 

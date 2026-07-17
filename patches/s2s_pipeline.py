@@ -788,7 +788,7 @@ def build_pipeline(
         # None when running a non-Pocket TTS backend — voice switching is simply unavailable then.
         tts_handler = next((h for h in pipeline_handlers if isinstance(h, PocketTTSHandler)), None)
         if llm_handler is not None:
-            cockpit = HermesCockpit(text_output_queue=text_output_queue)
+            cockpit = HermesCockpit(text_output_queue=text_output_queue, tts_queue=lm_processed_queue)
             voice_tools.set_cockpit(cockpit)
             websocket_streamer_ref.control_callback = BrainControl(
                 llm_handler,
