@@ -327,6 +327,13 @@ Design (mirrors ``wakeword_gate.py``; read that module first):
   or falsy leaves ``feed()`` passing everything through, so a plain restart
   with no env changes is byte-identical to today's behaviour.
 * **Three states, not two** -- see "Observe mode" below.
+* **Construction never raises either.** Every numeric env var falls back to
+  its documented default with a warning rather than throwing, and a
+  threshold outside rho's [0, 1] range is clamped toward fail-open (see
+  :func:`_clamp_threshold`). ``EchoGate()`` is built unguarded inside
+  ``WebSocketStreamer.__init__``, so a ``ValueError`` here would take the
+  whole assistant down at startup, before any of the fail-open machinery
+  below can help. A typo in an env var must not be able to do that.
 * **Fail open, permanently.** Any exception anywhere in scoring is logged
   once and the gate passes all audio, unconditionally, for the rest of the
   process -- a broken gate must never brick the assistant, and a half-broken
@@ -359,6 +366,7 @@ Design (mirrors ``wakeword_gate.py``; read that module first):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -404,6 +412,90 @@ _SILENCE_RMS_FLOOR = 50.0
 # Calibration affordance: log a correlation this high even when it doesn't
 # cross the (higher) drop threshold, so near-misses leave evidence in the log.
 _NEAR_MISS_FLOOR = 0.5
+_DEFAULT_THRESHOLD = 0.85
+_DEFAULT_LOG_EVERY = 32
+
+
+def _env_number(name: str, default: float, cast: Any) -> Any:
+    """Read a numeric env var, falling back to `default` on anything
+    unparseable rather than raising.
+
+    ``EchoGate()`` is constructed unguarded in ``WebSocketStreamer.__init__``,
+    and the streamer's defensive import at ``websocket_streamer.py:27`` only
+    catches import-time failures -- so a ``ValueError`` out of here takes the
+    whole voice agent down at startup. That is the exact opposite of this
+    module's fail-open contract, and it fails *before* anything is in place to
+    fail open: a typo in a hand-edited systemd drop-in would mean the
+    assistant simply does not boot. Every value here has a safe documented
+    default, so warn and carry on."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a number; using the default %r", name, raw, default)
+        return default
+
+
+def _clamp_threshold(value: float) -> float:
+    """Bring a parseable-but-meaningless threshold back into rho's range.
+
+    rho is a normalized correlation coefficient, so it is bounded [0, 1] by
+    construction and a threshold outside that range is always a mistake. The
+    two directions are not equally dangerous, so they are not treated alike:
+
+    * **Above 1.0** -- no rho can ever reach it, so the gate never drops.
+      That is the fail-open direction this module already prefers everywhere
+      else, so it is honoured: clamp to 1.0 (which still drops a bit-exact
+      echo scoring exactly 1.0) and warn. Silently rewriting it to the
+      default would be worse -- a typo that reads as harmless would quietly
+      *start* dropping audio.
+    * **Below 0.0** -- every rho clears it, so the gate drops *everything*:
+      total deafness to the user, the one failure the module docstring says
+      this pipeline must not have. Clamping to 0.0 would preserve exactly
+      that, so it is refused outright and the documented default is used.
+
+    * **nan** -- must be tested for explicitly, because it is the one value
+      that satisfies *neither* comparison: ``nan > 1.0`` and ``nan < 0.0``
+      are both False, so it would sail past both checks above. The effect
+      would be a gate that never drops (``rho >= nan`` is False for every
+      rho) while ``state()`` still reports ``"gating"`` -- working to the
+      operator, inert in fact, which is exactly the silent-no-op class this
+      hardening exists to close. Fail-open, so it cannot deafen anyone, but
+      it is refused: there is no direction to clamp nan toward.
+
+    Note ``inf`` and ``-inf`` need no special case: ``inf > 1.0`` is True so
+    it takes the clamp path, and ``-inf < 0.0`` is True so it takes the
+    refuse path -- both land where the rules above say they should. (Note
+    ``float("1e999")`` overflows to ``inf``, so it is covered by the same
+    path.)
+
+    Asymmetric on purpose. The rule is not "keep it in range", it is "clamp
+    toward fail-open, never toward deafness"."""
+    if math.isnan(value):
+        logger.warning(
+            "VOICE_ECHO_GATE_THRESHOLD is nan, which would silently disable dropping "
+            "while still reporting as active; using the default %r instead",
+            _DEFAULT_THRESHOLD,
+        )
+        return _DEFAULT_THRESHOLD
+    if value > 1.0:
+        logger.warning(
+            "VOICE_ECHO_GATE_THRESHOLD=%r is above rho's maximum of 1.0; clamping to 1.0 "
+            "(the gate will drop only a bit-exact echo)",
+            value,
+        )
+        return 1.0
+    if value < 0.0:
+        logger.warning(
+            "VOICE_ECHO_GATE_THRESHOLD=%r is negative, which would drop ALL mic audio; "
+            "using the default %r instead",
+            value,
+            _DEFAULT_THRESHOLD,
+        )
+        return _DEFAULT_THRESHOLD
+    return value
 
 
 class EchoGate:
@@ -419,9 +511,12 @@ class EchoGate:
         # reading `.enabled` to decide whether the gate is inert stays correct.
         self.mode = _OBSERVE if flag == _OBSERVE else ("on" if flag in _TRUTHY else "off")
         self.enabled = self.mode != "off"
-        self.threshold = float(os.environ.get("VOICE_ECHO_GATE_THRESHOLD", "0.85"))
+        self.threshold = _clamp_threshold(
+            _env_number("VOICE_ECHO_GATE_THRESHOLD", _DEFAULT_THRESHOLD, float)
+        )
         # Decimation for calibration lines logged while nothing is playing.
-        self._log_every = max(1, int(os.environ.get("VOICE_ECHO_GATE_LOG_EVERY", "32")))
+        # max(1, ...) also absorbs 0 and negatives, which mean "log everything".
+        self._log_every = max(1, int(_env_number("VOICE_ECHO_GATE_LOG_EVERY", _DEFAULT_LOG_EVERY, int)))
         self._idle_chunks = 0
         self._ref_buffer = bytearray()
         self._last_playback_ts = 0.0

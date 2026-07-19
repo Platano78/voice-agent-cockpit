@@ -754,18 +754,25 @@ def test_calibration_line_has_the_fields_a_calibration_needs(monkeypatch, caplog
 
 def test_calibration_verdict_tracks_the_threshold(monkeypatch, caplog):
     """`verdict` is what ON would return at the *current* threshold, so a
-    threshold sweep can be replayed offline against the logged rho."""
+    threshold sweep can be replayed offline against the logged rho.
+
+    Driven from below rather than above: a threshold of 1.5 would be clamped
+    to 1.0 (see `_clamp_threshold`), and a synthetic pure echo scores exactly
+    1.0000, so it would still read `drop`. A floor-scraping threshold instead
+    makes *unrelated* audio -- which passes comfortably at the 0.85 default --
+    log as `drop`, which shows the same coupling without leaving rho's range."""
     monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
-    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "1.5")  # unreachable
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "0.01")
     caplog.set_level("INFO")
     gate = eg.EchoGate()
     tts = _noise_pcm(SEND * 8, seed=17)
     for chunk in _chunks(tts, SEND):
         gate.note_playback(chunk)
     k = _lock_on_echo(gate, tts)
-    gate.feed(_echo_frame(tts, 0, k))
+    gate.feed(_noise_pcm(FRAME, seed=99))  # unrelated: rho well under 0.85
     scored = [f for f in map(_calib_fields, _calib_records(caplog)) if f["reason"] == "scored"]
-    assert scored[-1]["verdict"] == "pass"
+    assert float(scored[-1]["rho"]) < 0.85, "premise: this chunk passes at the default"
+    assert scored[-1]["verdict"] == "drop"
 
 
 def test_silence_is_visible_in_the_log_as_a_drop(monkeypatch, caplog):
@@ -829,3 +836,177 @@ def test_observe_still_fails_open_on_scoring_exception(monkeypatch, caplog):
     monkeypatch.setattr(eg.EchoGate, "_best_correlation", staticmethod(boom))
     assert gate.feed(_noise_pcm(FRAME, seed=22)) is True
     assert gate._fail_open is True
+
+
+# ── (11) env parsing never brings the assistant down ─────────────────────
+#
+# `EchoGate()` is constructed unguarded in `WebSocketStreamer.__init__`, and
+# the streamer's defensive import only catches import-time failures. A
+# ValueError out of __init__ therefore means the voice agent does not boot --
+# from a single typo in a hand-edited systemd drop-in. These pin that every
+# bad value degrades to the documented default with a warning instead.
+
+
+@pytest.mark.parametrize(
+    "var,value,attr,expected",
+    [
+        ("VOICE_ECHO_GATE_THRESHOLD", "high", "threshold", eg._DEFAULT_THRESHOLD),
+        ("VOICE_ECHO_GATE_THRESHOLD", "", "threshold", eg._DEFAULT_THRESHOLD),
+        ("VOICE_ECHO_GATE_THRESHOLD", "0.85 ", "threshold", 0.85),  # float() tolerates space
+        ("VOICE_ECHO_GATE_THRESHOLD", "nan", "threshold", eg._DEFAULT_THRESHOLD),
+        ("VOICE_ECHO_GATE_LOG_EVERY", "abc", "_log_every", eg._DEFAULT_LOG_EVERY),
+        ("VOICE_ECHO_GATE_LOG_EVERY", "", "_log_every", eg._DEFAULT_LOG_EVERY),
+        ("VOICE_ECHO_GATE_LOG_EVERY", "3.7", "_log_every", eg._DEFAULT_LOG_EVERY),  # int() rejects
+        ("VOICE_ECHO_GATE_LOG_EVERY", "0", "_log_every", 1),        # parses, floored
+        ("VOICE_ECHO_GATE_LOG_EVERY", "-5", "_log_every", 1),
+    ],
+)
+def test_unparseable_env_does_not_raise(monkeypatch, var, value, attr, expected):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    monkeypatch.setenv(var, value)
+    gate = eg.EchoGate()  # the assertion that matters: this line does not raise
+    if expected is not None:
+        assert getattr(gate, attr) == expected
+
+
+@pytest.mark.parametrize(
+    "var,value",
+    [
+        ("VOICE_ECHO_GATE_THRESHOLD", "high"),
+        ("VOICE_ECHO_GATE_THRESHOLD", ""),
+        ("VOICE_ECHO_GATE_LOG_EVERY", "abc"),
+        ("VOICE_ECHO_GATE_LOG_EVERY", "3.7"),
+    ],
+)
+def test_unparseable_env_warns_naming_the_variable(monkeypatch, caplog, var, value):
+    """The operator has to be able to find the typo, so the warning names the
+    variable and echoes the bad value back."""
+    monkeypatch.setenv(var, value)
+    caplog.set_level("WARNING")
+    eg.EchoGate()
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert var in msg
+    assert repr(value) in msg
+
+
+def test_a_good_env_value_warns_about_nothing(monkeypatch, caplog):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "0.7")
+    monkeypatch.setenv("VOICE_ECHO_GATE_LOG_EVERY", "16")
+    caplog.set_level("WARNING")
+    gate = eg.EchoGate()
+    assert gate.threshold == 0.7
+    assert gate._log_every == 16
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+def test_threshold_above_one_clamps_toward_fail_open(monkeypatch, caplog):
+    """rho can never exceed 1.0, so a threshold above it means "never drop".
+    That is the fail-open direction, so it is honoured rather than rewritten:
+    clamping to the default would make a harmless-looking typo silently START
+    dropping audio."""
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "5")
+    caplog.set_level("WARNING")
+    gate = eg.EchoGate()
+    assert gate.threshold == 1.0
+    assert "VOICE_ECHO_GATE_THRESHOLD" in caplog.records[0].getMessage()
+
+
+def test_negative_threshold_is_refused_not_clamped(monkeypatch, caplog):
+    """Clamping -1 to 0.0 would preserve exactly the disaster -- every rho
+    clears 0.0, so the gate drops all mic audio and the assistant goes deaf.
+    Deafness is the one failure this pipeline must not have, so the value is
+    refused and the documented default used."""
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "-1")
+    caplog.set_level("WARNING")
+    gate = eg.EchoGate()
+    assert gate.threshold == eg._DEFAULT_THRESHOLD
+    assert gate.threshold != 0.0
+    assert "VOICE_ECHO_GATE_THRESHOLD" in caplog.records[0].getMessage()
+
+
+@pytest.mark.parametrize("value", ["0", "1", "0.85"])
+def test_in_range_thresholds_are_untouched(monkeypatch, value):
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", value)
+    assert eg.EchoGate().threshold == float(value)
+
+
+def test_bad_env_still_produces_a_working_gate(monkeypatch):
+    """Degrading must leave a *functional* gate, not just a constructed one:
+    with a garbage threshold it still drops a pure echo at the default."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "1")
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "not-a-number")
+    monkeypatch.setenv("VOICE_ECHO_GATE_LOG_EVERY", "not-a-number")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 8, seed=30)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    k = _lock_on_echo(gate, tts)
+    assert gate.feed(_echo_frame(tts, 0, k)) is False
+
+
+# ── (12) non-finite thresholds ───────────────────────────────────────────
+#
+# nan is the one value that satisfies neither range comparison, so it slips
+# past a naive "clamp above / refuse below" pair and yields a gate that never
+# drops while `state()` still says "gating" -- silently inert. inf/-inf need
+# no special case; these pin that they land on the right side anyway.
+
+
+def test_nan_threshold_is_refused(monkeypatch, caplog):
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "nan")
+    caplog.set_level("WARNING")
+    gate = eg.EchoGate()
+    assert gate.threshold == eg._DEFAULT_THRESHOLD
+    assert not math.isnan(gate.threshold)
+    assert "VOICE_ECHO_GATE_THRESHOLD" in caplog.records[0].getMessage()
+
+
+def test_nan_would_have_passed_both_range_checks():
+    """Pins *why* the explicit guard is needed, so nobody 'simplifies' it away
+    into a symmetric clamp later: nan defeats both comparisons."""
+    nan = float("nan")
+    assert not (nan > 1.0)
+    assert not (nan < 0.0)
+
+
+def test_nan_threshold_still_drops_a_pure_echo(monkeypatch):
+    """The failure this closes: with threshold=nan, `rho >= threshold` is False
+    for every rho, so the gate never drops while still reporting as active.
+    After the guard it drops a pure echo at the default."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "1")
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "nan")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 8, seed=31)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    k = _lock_on_echo(gate, tts)
+    assert gate.feed(_echo_frame(tts, 0, k)) is False
+
+
+@pytest.mark.parametrize("value,expected", [("inf", 1.0), ("1e999", 1.0)])
+def test_positive_infinity_takes_the_clamp_path(monkeypatch, value, expected):
+    """`inf > 1.0` is True, so it needs no special case -- it clamps to 1.0
+    like any other above-range value. (`1e999` overflows to inf.)"""
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", value)
+    assert eg.EchoGate().threshold == expected
+
+
+@pytest.mark.parametrize("value", ["-inf", "-1e999"])
+def test_negative_infinity_takes_the_refuse_path_not_the_clamp(monkeypatch, value):
+    """`-inf < 0.0` is True, so it is refused rather than clamped. Clamping it
+    to 0.0 would mean every rho clears the threshold: total deafness."""
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", value)
+    gate = eg.EchoGate()
+    assert gate.threshold == eg._DEFAULT_THRESHOLD
+    assert gate.threshold != 0.0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e999"])
+def test_log_every_rejects_every_non_finite_spelling(monkeypatch, value):
+    """The int path needs no isnan guard: int() rejects all of these, which
+    `_env_number` already catches. Pinned so that stays true."""
+    monkeypatch.setenv("VOICE_ECHO_GATE_LOG_EVERY", value)
+    assert eg.EchoGate()._log_every == eg._DEFAULT_LOG_EVERY
