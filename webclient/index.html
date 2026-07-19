@@ -907,6 +907,8 @@
   #phoneContextStatus { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-top: 4px; }
   #phoneContextStatus.phoneContextError { color: var(--bad); }
   #personaStatus { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-top: 8px; word-break: break-word; }
+  #personaTierHint { text-align: left; margin-top: 4px; }
+  #personaScopeRow .panelBtn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #05161a; font-weight: 700; }
   #personaLibRow { display: flex; gap: 6px; }
   #personaLibRow .panelBtn { width: auto; flex: 0 0 auto; margin-top: 0; padding: 8px 12px; }
   #personaNameInput {
@@ -1405,6 +1407,10 @@
   <div class="label">Brain</div>
   <div id="brainList"></div>
   <div class="label">Persona</div>
+  <div class="voiceCloneLane" id="personaScopeRow" role="group" aria-label="Persona applies to">
+    <button type="button" class="panelBtn" id="personaScopeGlobalBtn" aria-pressed="true">Every brain</button>
+    <button type="button" class="panelBtn" id="personaScopeBrainBtn" aria-pressed="false">This brain only</button>
+  </div>
   <select id="personaSelect"></select>
   <textarea id="personaInput" placeholder="Leave empty to restore default persona"></textarea>
   <div id="personaLibRow">
@@ -1413,9 +1419,11 @@
     <button class="panelBtn" id="personaDeleteBtn">Delete</button>
   </div>
   <div class="voiceCloneLane">
-    <button type="button" class="panelBtn" id="personaResetBtn">Use default persona</button>
+    <button type="button" class="panelBtn" id="personaPresetBtn" hidden>Use the tuned preset</button>
+    <button type="button" class="panelBtn" id="personaResetBtn">Clear</button>
   </div>
   <div id="personaStatus" role="status" aria-live="polite"></div>
+  <div class="hint" id="personaTierHint"></div>
   <div class="label" id="voiceLabel" hidden>Voice</div>
   <select id="voiceSelect" hidden></select>
   <div id="wakeWordBlock" hidden>
@@ -1646,7 +1654,11 @@ const els = {
   personaSaveBtn: document.getElementById("personaSaveBtn"),
   personaDeleteBtn: document.getElementById("personaDeleteBtn"),
   personaResetBtn: document.getElementById("personaResetBtn"),
+  personaPresetBtn: document.getElementById("personaPresetBtn"),
   personaStatus: document.getElementById("personaStatus"),
+  personaTierHint: document.getElementById("personaTierHint"),
+  personaScopeGlobalBtn: document.getElementById("personaScopeGlobalBtn"),
+  personaScopeBrainBtn: document.getElementById("personaScopeBrainBtn"),
   voiceLabel: document.getElementById("voiceLabel"),
   voiceSelect: document.getElementById("voiceSelect"),
   wsUrlInput: document.getElementById("wsUrlInput"),
@@ -2174,7 +2186,7 @@ els.personaSelect.addEventListener("change", () => {
     els.personaInput.value = "";
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "config_set", persona: "" }));
+      ws.send(JSON.stringify({ type: "config_set", persona: "", persona_scope: personaScope }));
     }
   } else if (name) {
     const personas = loadPersonas();
@@ -2184,7 +2196,7 @@ els.personaSelect.addEventListener("change", () => {
     els.personaInput.value = personas[name] || "";
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, name); } catch {}
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "config_set", persona: els.personaInput.value }));
+      ws.send(JSON.stringify({ type: "config_set", persona: els.personaInput.value, persona_scope: personaScope }));
     }
   } else {
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, ""); } catch {}
@@ -2214,7 +2226,7 @@ els.personaDeleteBtn.addEventListener("click", () => {
     els.personaInput.value = "";
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "config_set", persona: "" }));
+      ws.send(JSON.stringify({ type: "config_set", persona: "", persona_scope: personaScope }));
     }
   }
   populatePersonaSelect();
@@ -2680,19 +2692,21 @@ function renderConfigState(ev) {
     els.brainList.appendChild(row);
   });
 
+  if (ev.persona_tiers) lastPersonaTiers = ev.persona_tiers;
   // Don't clobber text the user is actively editing.
   if (document.activeElement !== els.personaInput) {
-    els.personaInput.value = ev.persona || "";
+    // The textarea edits ONE tier — whichever scope is selected — not the
+    // resolved persona, so applying it can't silently promote a preset or a
+    // global into a per-brain override the user never asked for.
+    els.personaInput.value = personaTextForScope();
     const personas = loadPersonas();
     const defaultPersona = ev.default_persona || "";
-    const matchName = Object.keys(personas).find((name) => personas[name] === (ev.persona || ""));
+    const matchName = Object.keys(personas).find((name) => personas[name] === els.personaInput.value);
     const onDefault = (ev.persona || "") === defaultPersona;
-    const active = matchName || (onDefault ? "__default__" : "");
-    els.personaSelect.value = active;
-    try { localStorage.setItem(PERSONA_ACTIVE_KEY, active); } catch {}
-    els.personaInput.placeholder = defaultPersona
-      ? "Default: " + (defaultPersona.length > 60 ? defaultPersona.slice(0, 60) + "…" : defaultPersona)
-      : "Leave empty to restore default persona";
+    const activeLibEntry = matchName || (onDefault ? "__default__" : "");
+    els.personaSelect.value = activeLibEntry;
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, activeLibEntry); } catch {}
+    els.personaInput.placeholder = personaPlaceholderForScope(defaultPersona);
   }
   renderPersonaStatus(ev);
 
@@ -2728,24 +2742,91 @@ function renderConfigState(ev) {
   updateSessionRail(ev, active);
 }
 
-// Says which persona is actually running, and whether it will survive a restart.
-// `persona_persisted` rides on both config_state and config_ack; an older server
-// that doesn't send it leaves the durability half unstated rather than lying.
+// ── Persona tiers (per-brain override > preset > global > shipped default) ──
+// `persona_tiers` rides on config_state and config_ack. An older server that
+// doesn't send it leaves lastPersonaTiers null, and the panel degrades to the
+// single-field behaviour it had before.
+let lastPersonaTiers = null;
+let personaScope = "global";
+
+// The textarea always edits exactly one tier: the global, or this brain's
+// override. In brain scope with a preset selected, it shows the preset text so
+// the user can read it and edit from it — editing then makes it their own.
+function personaTextForScope() {
+  const t = lastPersonaTiers;
+  if (!t) return "";
+  if (personaScope === "global") return t.global || "";
+  if (t.brain_mode === "custom") return t.brain_text || "";
+  if (t.brain_mode === "preset") return t.preset || "";
+  return "";
+}
+
+function personaPlaceholderForScope(defaultPersona) {
+  if (personaScope === "brain") {
+    return "Empty — " + (lastPersonaTiers && lastPersonaTiers.brain || "this brain") +
+      " uses your global persona";
+  }
+  return defaultPersona
+    ? "Default: " + (defaultPersona.length > 60 ? defaultPersona.slice(0, 60) + "…" : defaultPersona)
+    : "Leave empty to restore default persona";
+}
+
+function setPersonaScope(scope) {
+  personaScope = scope;
+  els.personaScopeGlobalBtn.setAttribute("aria-pressed", String(scope === "global"));
+  els.personaScopeBrainBtn.setAttribute("aria-pressed", String(scope === "brain"));
+  if (document.activeElement !== els.personaInput) {
+    els.personaInput.value = personaTextForScope();
+    els.personaInput.placeholder = personaPlaceholderForScope(lastKnownDefaultPersona);
+  }
+  renderPersonaStatus(null);
+}
+els.personaScopeGlobalBtn.addEventListener("click", () => setPersonaScope("global"));
+els.personaScopeBrainBtn.addEventListener("click", () => setPersonaScope("brain"));
+
+// Says which tier is actually in force, and whether it survives a restart.
+let lastKnownDefaultPersona = "";
+const TIER_SENTENCE = {
+  brain_custom: (t) => `In force: your own persona for ${t.brain}.`,
+  brain_preset: (t) => `In force: the tuned preset for ${t.brain}.`,
+  global: () => "In force: your global persona, on every brain.",
+  default: () => "In force: the persona this server was started with.",
+};
 function renderPersonaStatus(ev) {
   if (!els.personaStatus) return;
-  const persona = (ev.persona || "").trim();
-  const defaultPersona = (ev.default_persona || "").trim();
-  const onDefault = !persona || persona === defaultPersona;
-  if (onDefault) {
-    els.personaStatus.textContent = "Running the default persona.";
+  if (ev && ev.default_persona !== undefined) lastKnownDefaultPersona = ev.default_persona || "";
+  const t = lastPersonaTiers;
+
+  if (!t) {
+    // Pre-tier server: say only what we can actually tell.
+    const persona = ((ev && ev.persona) || "").trim();
+    els.personaStatus.textContent = !persona || persona === lastKnownDefaultPersona
+      ? "Running the default persona."
+      : "Running a custom persona.";
+    els.personaTierHint.textContent = "";
     return;
   }
-  const durable = ev.persona_persisted === true
-    ? " Saved on the server — survives a restart."
-    : ev.persona_persisted === false
-      ? " Not saved on the server — a restart reverts to the default."
-      : "";
-  els.personaStatus.textContent = "Running a custom persona." + durable;
+
+  const sentence = (TIER_SENTENCE[t.resolved_from] || TIER_SENTENCE.default)(t);
+  const persisted = ev && ev.persona_persisted;
+  const durable = t.resolved_from === "default"
+    ? ""
+    : persisted === true
+      ? " Saved — survives a restart."
+      : persisted === false
+        ? " Not saved — a restart reverts it."
+        : "";
+  els.personaStatus.textContent = sentence + durable;
+
+  // What Clear does from here, spelled out rather than guessed at.
+  els.personaTierHint.textContent = personaScope === "brain"
+    ? (t.brain_mode === "inherit"
+        ? `Editing ${t.brain} only. It has no persona of its own yet, so it follows the global one.`
+        : `Editing ${t.brain} only. Clear falls back to your global persona.`)
+    : "Editing the persona used by every brain. Clear falls back to the server's own default.";
+
+  els.personaPresetBtn.hidden = !(personaScope === "brain" && t.preset);
+  els.personaResetBtn.textContent = personaScope === "brain" ? "Clear (use global)" : "Clear (use default)";
 }
 
 const applyPersonaBtnLabel = els.applyPersonaBtn.textContent;
@@ -2756,16 +2837,30 @@ let personaApplyPending = false;
 els.personaResetBtn.addEventListener("click", () => {
   if (!(ws && ws.readyState === WebSocket.OPEN)) return;
   els.personaInput.value = "";
-  try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
-  populatePersonaSelect();
+  if (personaScope === "global") {
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
+    populatePersonaSelect();
+  }
   personaApplyPending = true;
-  ws.send(JSON.stringify({ type: "config_set", persona: "" }));
-  els.personaStatus.textContent = "Restoring the default persona…";
+  ws.send(JSON.stringify({ type: "config_set", persona: "", persona_scope: personaScope }));
+  els.personaStatus.textContent = personaScope === "brain"
+    ? "Clearing this brain's persona…"
+    : "Restoring the default persona…";
+});
+els.personaPresetBtn.addEventListener("click", () => {
+  if (!(ws && ws.readyState === WebSocket.OPEN)) return;
+  personaApplyPending = true;
+  ws.send(JSON.stringify({ type: "config_set", persona_scope: "brain", persona_mode: "preset" }));
+  els.personaStatus.textContent = "Switching to the tuned preset…";
 });
 els.applyPersonaBtn.addEventListener("click", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     personaApplyPending = true;
-    ws.send(JSON.stringify({ type: "config_set", persona: els.personaInput.value }));
+    ws.send(JSON.stringify({
+      type: "config_set",
+      persona: els.personaInput.value,
+      persona_scope: personaScope,
+    }));
 
     if (!applyPersonaFlashGuard) {
       applyPersonaFlashGuard = true;
@@ -3388,6 +3483,7 @@ function handleEvent(text) {
       }
       if (ev.ok) {
         personaApplyPending = false;
+        if (ev.persona_tiers) lastPersonaTiers = ev.persona_tiers;
         renderPersonaStatus(ev);
         log(`brain=${ev.active_brain} model=${ev.model}`);
         if (ev.chat_reset) {

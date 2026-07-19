@@ -45,20 +45,63 @@ kept as an instant rollback (see below).
   logged; `_resolve_model`'s `GET {base_url}/models` sends it as
   `Authorization: Bearer <key>` when present.
 
-  **Persona persistence.** A persona set from the settings panel is written to
-  `$HOME/speech-to-speech/persona.json` (override with `VOICE_PERSONA_FILE`) —
-  outside the package, next to `brains.json` and the `voices/` sidecar, so a
-  `pip install --upgrade` can't erase it. At startup a persisted persona takes
-  precedence over the CLI `--init_chat_prompt` default; clearing the persona in
-  the panel deletes the file and falls back to that default. Writes are atomic
-  (temp file + `os.replace`). The load is fail-safe: a missing, empty,
-  unreadable, corrupt, or oversized file logs a warning and falls back to the
-  default rather than raising — this runs at pipeline startup, so it must never
-  take the assistant down. Submitted personas are bounded at
-  `PERSONA_MAX_CHARS` (8000) and rejected if they contain control characters
-  other than newline/tab/CR. The on-disk format is a versioned object
-  (`{"version": 1, "persona": "…"}`) so a later per-brain keying can add a
-  sibling map without a format break.
+  **Persona persistence (tiered).** Personas set from the settings panel are
+  written to `$HOME/speech-to-speech/persona.json` (override with
+  `VOICE_PERSONA_FILE`) — outside the package, next to `brains.json` and the
+  `voices/` sidecar, so a `pip install --upgrade` can't erase it.
+
+  The effective persona is resolved per brain, most specific tier first:
+
+  1. **per-brain override** — what the user typed for *this* brain
+  2. **per-brain preset** — a shipped, brain-tuned persona (`BRAIN_PRESETS`),
+     applied only to a brain the user explicitly put in preset mode
+  3. **global persona** — what the user typed once, for every brain
+  4. **shipped default** — the CLI `--init_chat_prompt` value
+
+  Presets are offered, never imposed: a brain the user never configured
+  resolves to their global persona, because auto-preferring a preset would
+  silently override words the user wrote. Preset mode stores the *choice*, not
+  a copy of the text, so an improved preset reaches the users who selected it.
+  Resolution re-runs on every brain switch, and a changed effective persona
+  resets chat history (the earlier turns were produced under a different system
+  prompt). `BRAIN_PRESETS` has entries for `coder`, `local`, `frontier` and
+  `hermes` -- each states what that lane is *for* (its role in the cockpit),
+  never a claim about what a model behind it can or can't do, since the model
+  running any given lane varies per deployment. An unrecognized or unkeyed
+  brain (e.g. a renamed or custom lane) has no preset and simply inherits
+  global → default.
+
+  On-disk shape (`version: 2`):
+
+  ```json
+  {"version": 2, "global": "…",
+   "brains": {"hermes": {"mode": "preset"},
+              "coder": {"mode": "custom", "text": "…"}}}
+  ```
+
+  Clearing is defined at every level: clearing a per-brain override removes
+  that brain's entry and falls back to global → default; clearing the global
+  falls back to the shipped default; when no tier holds anything the file is
+  deleted. Writes are atomic (temp file + `os.replace`). The load is fail-safe:
+  a missing, empty, unreadable or corrupt file logs a warning and yields an
+  empty store rather than raising — this runs at pipeline startup, so it must
+  never take the assistant down — and a single malformed brain entry is dropped
+  without costing the user the other tiers. The older `version: 1` global-only
+  shape (`{"version": 1, "persona": "…"}`) still loads, as the global persona.
+  Submitted personas are bounded at `PERSONA_MAX_CHARS` (8000) and rejected if
+  they contain control characters other than newline/tab/CR.
+
+  Control protocol: `config_set` takes `persona` plus an optional
+  `persona_scope` (`"global"`, the default, or `"brain"`) and, for brain scope,
+  `persona_mode` (`"custom"`, `"preset"`, `"inherit"`). `config_state` and
+  `config_ack` carry a `persona_tiers` block telling the panel which tier is in
+  force and what the other tiers hold.
+
+  Note `voice_rules.py` mitigates the qwen-class answer-length collapse
+  globally, for every brain, though the problem is really specific to the
+  `local` router's loaded model. Per-brain personas make that a candidate for
+  narrowing later — **not** done here: `voice_rules.py` is load-bearing and a
+  persona is user-editable, so a pipeline invariant must not be moved into one.
 
 - `websocket_streamer.py` — `speech_to_speech/connections/websocket_streamer.py`.
   Adds a `control_callback` constructor kwarg and a text-frame branch in

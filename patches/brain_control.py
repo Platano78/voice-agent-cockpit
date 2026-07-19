@@ -30,6 +30,63 @@ PERSONA_MAX_CHARS = 8000
 # character (and DEL) is a paste accident or a smuggled control sequence.
 _ALLOWED_CONTROL_CHARS = "\n\r\t"
 
+# Shipped per-brain starting points. These are OFFERED, never auto-applied: a
+# preset only takes effect for a brain the user explicitly put in preset mode,
+# because silently preferring one over a global persona the user typed would
+# override their own words.
+#
+# Each preset states the lane's PURPOSE -- what this lane is for in the
+# cockpit -- never a claim about what any particular model cannot do. Lanes
+# are roles; the model behind a lane varies per deployment. (User ruling
+# 2026-07-19.)
+BRAIN_PRESETS: dict[str, str] = {
+    # The always-on lane: whatever fast local model answers by default.
+    "coder": (
+        "You are the always-on lane of this cockpit: the brain that answers "
+        "instantly and drives tools. Answer in one or two spoken sentences, "
+        "then stop. When a request needs a tool, call it straight away instead "
+        "of talking through what you might do. "
+        "Everything you say is spoken aloud, so use no markdown, lists, or code blocks."
+    ),
+    # The desktop lane: whatever model the user has loaded locally. The "stay
+    # full late in conversation" line is a mitigation phrased as instruction --
+    # loaded desktop models have been observed getting terser as history grows.
+    "local": (
+        "You are the desktop lane: whatever model the user has loaded on their "
+        "own machine. Keep your answers as full late in a long conversation as "
+        "at the start -- do not get terser as the history grows. "
+        "Think it through, but say only the conclusion out loud. "
+        "Everything you say is spoken aloud, so use no markdown, lists, or code blocks."
+    ),
+    # The escalation lane: a hosted model behind any OpenAI-compatible endpoint,
+    # reached for questions worth the trip.
+    "frontier": (
+        "You are the frontier lane: a hosted model reached for the questions "
+        "worth escalating. Give the considered answer rather than the fast "
+        "one, in a few spoken sentences. "
+        "Everything you say is spoken aloud, so use no markdown, lists, or code blocks."
+    ),
+    # Not a raw model: an agent behind a shim, with its own planning, loops and
+    # memory, which may work for minutes and report back over its own channel.
+    # Talking to it is delegation, so a persona tuned for snappy voice replies is
+    # actively wrong here (council 3-0, 2026-07-03: the cockpit is not an agent).
+    "hermes": (
+        "You are the voice front end to Hermes, an autonomous agent with its own "
+        "planning, tools and memory. Work sent here is delegated, not answered on "
+        "the spot. Say out loud what you are handing off and that it is running, "
+        "then stop -- a task may take minutes and report back separately. "
+        "Do not attempt the work yourself in this reply, and never invent a result "
+        "for something still in progress. "
+        "Everything you say is spoken aloud, so use no markdown, lists, or code blocks."
+    ),
+}
+
+# Resolution tiers, most specific first. Reported to the UI as `resolved_from`.
+TIER_BRAIN_CUSTOM = "brain_custom"
+TIER_BRAIN_PRESET = "brain_preset"
+TIER_GLOBAL = "global"
+TIER_DEFAULT = "default"
+
 
 def persona_path() -> Path:
     return Path(os.environ.get("VOICE_PERSONA_FILE", _DEFAULT_PERSONA_FILE)).expanduser()
@@ -48,58 +105,106 @@ def validate_persona(text: Any) -> tuple[bool, str]:
     return True, ""
 
 
-def load_persona() -> Optional[str]:
-    """Read the persisted persona, or None when there isn't a usable one.
+def empty_persona_store() -> dict[str, Any]:
+    return {"version": 2, "global": "", "brains": {}}
+
+
+def _sanitize_brain_entry(raw: Any) -> Optional[dict[str, Any]]:
+    """Normalize one stored per-brain entry, or None if it's unusable.
+
+    Tolerates a bare string (an override written by hand) as custom text.
+    Anything that fails validation is dropped rather than raising -- one bad
+    brain entry must not cost the user their other brains' personas.
+    """
+    if isinstance(raw, str):
+        raw = {"mode": "custom", "text": raw}
+    if not isinstance(raw, dict):
+        return None
+    mode = raw.get("mode")
+    if mode == "preset":
+        return {"mode": "preset"}
+    if mode != "custom":
+        return None
+    text = raw.get("text")
+    ok, _ = validate_persona(text)
+    if not ok or not text:
+        return None
+    return {"mode": "custom", "text": text}
+
+
+def load_persona_store() -> dict[str, Any]:
+    """Read the persisted persona store, always returning a usable dict.
 
     Fail-safe by construction: this runs at pipeline startup in a live voice
-    assistant, so a missing/empty/unreadable/corrupt/oversized file logs and
-    yields None (fall back to the CLI default) rather than raising.
+    assistant, so a missing/empty/unreadable/corrupt file logs and yields an
+    empty store (everything falls back to the CLI default) rather than raising.
+    Individual malformed fields are dropped, not fatal.
+
+    Reads the v1 global-only shape (`{"version": 1, "persona": "..."}`) as a
+    global persona, so a file written before per-brain personas existed keeps
+    working.
     """
     path = persona_path()
+    store = empty_persona_store()
     try:
         with open(path, "r") as f:
             payload = json.load(f)
     except FileNotFoundError:
-        return None
+        return store
     except (OSError, ValueError) as e:
         logger.warning("BrainControl: ignoring unreadable persona file %s: %s", path, e)
-        return None
+        return store
 
     if not isinstance(payload, dict):
         logger.warning("BrainControl: ignoring malformed persona file %s: not an object", path)
-        return None
+        return store
 
-    persona = payload.get("persona")
-    if persona is None:
-        return None
-    ok, error = validate_persona(persona)
-    if not ok:
-        logger.warning("BrainControl: ignoring persona file %s: %s", path, error)
-        return None
-    return persona or None
+    # v1: a single global persona under `persona`. v2 keeps it under `global`.
+    raw_global = payload.get("global", payload.get("persona"))
+    if raw_global:
+        ok, error = validate_persona(raw_global)
+        if ok:
+            store["global"] = raw_global
+        else:
+            logger.warning("BrainControl: dropping global persona from %s: %s", path, error)
+
+    raw_brains = payload.get("brains")
+    if isinstance(raw_brains, dict):
+        for name, raw_entry in raw_brains.items():
+            entry = _sanitize_brain_entry(raw_entry) if isinstance(name, str) else None
+            if entry is None:
+                logger.warning("BrainControl: dropping unusable persona entry for brain %r in %s", name, path)
+                continue
+            store["brains"][name] = entry
+    elif raw_brains is not None:
+        logger.warning("BrainControl: ignoring malformed `brains` in %s: not an object", path)
+
+    return store
 
 
-def save_persona(text: Optional[str]) -> None:
-    """Persist `text`, or clear the persisted persona when it's empty/None.
+def save_persona_store(store: dict[str, Any]) -> None:
+    """Persist `store`, or delete the file when nothing is configured.
 
     Atomic (same-directory temp file + `os.replace`), so a crash mid-write can
-    never leave a truncated file for `load_persona` to choke on. Best-effort:
-    a write failure logs and returns -- the in-memory persona is already live,
-    and losing persistence must not fail the user's config_set.
-
-    Envelope is a versioned object rather than a bare string so a later
-    per-brain keying can add a sibling `brains` map without a format break.
+    never leave a truncated file for `load_persona_store` to choke on.
+    Best-effort: a write failure logs and returns -- the in-memory persona is
+    already live, and losing persistence must not fail the user's config_set.
     """
     path = persona_path()
+    payload = {
+        "version": 2,
+        "global": store.get("global") or "",
+        "brains": {k: v for k, v in (store.get("brains") or {}).items() if v},
+    }
     try:
-        if not text:
+        if not payload["global"] and not payload["brains"]:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(path.name + ".tmp")
         try:
             with open(tmp_path, "w") as f:
-                json.dump({"version": 1, "persona": text}, f)
+                json.dump(payload, f)
             os.replace(tmp_path, path)
         finally:
             try:
@@ -108,6 +213,23 @@ def save_persona(text: Optional[str]) -> None:
                 pass
     except OSError as e:
         logger.warning("BrainControl: failed to persist persona to %s: %s", path, e)
+
+
+def resolve_persona(store: dict[str, Any], brain: str, default: str) -> tuple[str, str]:
+    """Resolve the effective persona for `brain`, most specific tier first.
+
+    Returns `(text, tier)`. A brain in preset mode reads `BRAIN_PRESETS` live,
+    so a preset improved in a later release reaches the users who selected it
+    instead of being frozen at the moment they clicked.
+    """
+    entry = (store.get("brains") or {}).get(brain) or {}
+    if entry.get("mode") == "custom" and entry.get("text"):
+        return entry["text"], TIER_BRAIN_CUSTOM
+    if entry.get("mode") == "preset" and BRAIN_PRESETS.get(brain):
+        return BRAIN_PRESETS[brain], TIER_BRAIN_PRESET
+    if store.get("global"):
+        return store["global"], TIER_GLOBAL
+    return default, TIER_DEFAULT
 
 
 class BrainControl:
@@ -152,11 +274,11 @@ class BrainControl:
         self.default_persona = runtime_config.session.instructions or ""
         # Startup precedence: a persona persisted from the panel outranks the
         # CLI default, so an edit survives a restart without touching the unit
-        # file. Clearing it deletes the file and this falls back to the default.
-        persisted = load_persona()
-        if persisted:
-            runtime_config.session.instructions = persisted
-            logger.info("BrainControl: loaded persisted persona from %s", persona_path())
+        # file. Clearing everything deletes the file and this falls back to the
+        # default. Resolution is per-brain, so it's re-run on every brain switch.
+        self.persona_store = load_persona_store()
+        self.persona_tier = TIER_DEFAULT
+        self._apply_persona()
         self._config_lock = threading.Lock()
         self.tools_armed = 0
         try:
@@ -165,6 +287,35 @@ class BrainControl:
             self.tools_armed = len(armed)
         except Exception as e:
             logger.warning("BrainControl: failed to arm voice tools: %s", e)
+
+    def _apply_persona(self) -> bool:
+        """Re-resolve the persona for the active brain and push it into the
+        runtime config. Returns True when the effective persona changed --
+        the caller resets chat history on that, since the system prompt the
+        earlier turns were produced under is no longer the one in force."""
+        text, tier = resolve_persona(self.persona_store, self.active_brain, self.default_persona)
+        self.persona_tier = tier
+        new_instructions = text or None
+        if new_instructions == self.runtime_config.session.instructions:
+            return False
+        self.runtime_config.session.instructions = new_instructions
+        logger.info("BrainControl: persona for brain %s resolved from tier %s", self.active_brain, tier)
+        return True
+
+    def _persona_tier_state(self) -> dict[str, Any]:
+        """Everything the panel needs to show WHICH tier is in force and what
+        the other tiers hold, so switching brains can update the display
+        without another round trip."""
+        entry = (self.persona_store.get("brains") or {}).get(self.active_brain) or {}
+        return {
+            "resolved_from": self.persona_tier,
+            "global": self.persona_store.get("global") or "",
+            "brain": self.active_brain,
+            "brain_mode": entry.get("mode") or "inherit",
+            "brain_text": entry.get("text") or "",
+            "preset": BRAIN_PRESETS.get(self.active_brain, ""),
+            "presets": dict(BRAIN_PRESETS),
+        }
 
     @property
     def persona_persisted(self) -> bool:
@@ -290,6 +441,7 @@ class BrainControl:
             "persona": self.runtime_config.session.instructions or "",
             "default_persona": self.default_persona or "",
             "persona_persisted": self.persona_persisted,
+            "persona_tiers": self._persona_tier_state(),
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
             "voices": self._predefined_voices() if self.tts_handler else [],
             "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
@@ -321,6 +473,10 @@ class BrainControl:
                     return {"type": "config_ack", "ok": False, "error": error}
                 if self.active_brain != prev_brain:
                     chat_reset = True
+                    # The new brain may have its own override or preset -- the
+                    # persona is a property of the brain in force, not of the
+                    # session, so re-resolve before anything else reads it.
+                    self._apply_persona()
             if "voice" in msg:
                 ok, error = self._set_voice(msg["voice"])
                 if not ok:
@@ -329,20 +485,12 @@ class BrainControl:
                 ok, error = self._voice_delete(msg["voice_delete"])
                 if not ok:
                     return {"type": "config_ack", "ok": False, "error": error}
-            if "persona" in msg:
-                persona = msg["persona"]
-                ok, error = validate_persona(persona)
+            if "persona" in msg or "persona_mode" in msg:
+                ok, error = self._set_persona(msg)
                 if not ok:
                     return {"type": "config_ack", "ok": False, "error": error}
-                new_instructions = persona if persona else (self.default_persona or None)
-                if new_instructions != self.runtime_config.session.instructions:
-                    self.runtime_config.session.instructions = new_instructions
+                if self._apply_persona():
                     chat_reset = True
-                # Persisted unconditionally, not only on a change: an unchanged
-                # persona may still not be on disk yet (first save after the
-                # CLI default was matched by hand), and an empty persona must
-                # clear the file even when instructions already equal the default.
-                save_persona(persona)
             if "wake_word" in msg:
                 if self.streamer is None:
                     return {"type": "config_ack", "ok": False, "error": "wake word control unavailable"}
@@ -382,12 +530,55 @@ class BrainControl:
                 "persona": self.runtime_config.session.instructions or "",
                 "default_persona": self.default_persona or "",
                 "persona_persisted": self.persona_persisted,
+                "persona_tiers": self._persona_tier_state(),
                 "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
                 "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
                 "tools_armed": self.tools_armed,
                 "wake_word": self._wake_word_state(),
                 "chat_reset": chat_reset,
             }
+
+    def _set_persona(self, msg: dict[str, Any]) -> tuple[bool, str]:
+        """Write one tier of the persona store.
+
+        `persona_scope` picks the tier: "global" (the default, and what an
+        older client that only sends `persona` gets) or "brain" (the active
+        brain). For brain scope, `persona_mode` selects "custom" (use the
+        `persona` text), "preset" (track the shipped preset for this brain),
+        or "inherit" (drop the override and fall through to global/default).
+        Clearing custom text is the same as inherit -- an override you emptied
+        falls back down the chain, it never means "no persona".
+        """
+        scope = msg.get("persona_scope", "global")
+        if scope not in ("global", "brain"):
+            return False, f"unknown persona scope: {scope}"
+
+        persona = msg.get("persona", "")
+        ok, error = validate_persona(persona)
+        if not ok:
+            return False, error
+
+        if scope == "global":
+            self.persona_store["global"] = persona
+        else:
+            mode = msg.get("persona_mode", "custom")
+            if mode not in ("custom", "preset", "inherit"):
+                return False, f"unknown persona mode: {mode}"
+            brains = self.persona_store.setdefault("brains", {})
+            if mode == "preset":
+                if not BRAIN_PRESETS.get(self.active_brain):
+                    return False, f"no preset available for brain: {self.active_brain}"
+                brains[self.active_brain] = {"mode": "preset"}
+            elif mode == "custom" and persona:
+                brains[self.active_brain] = {"mode": "custom", "text": persona}
+            else:
+                brains.pop(self.active_brain, None)
+
+        # Persisted unconditionally, not only on a change: an unchanged persona
+        # may still not be on disk yet, and a cleared one must remove its entry
+        # even when the resolved text happens to be identical.
+        save_persona_store(self.persona_store)
+        return True, ""
 
     def _handle_permission_respond(self, payload: Any) -> dict[str, Any]:
         if self.cockpit is None:
