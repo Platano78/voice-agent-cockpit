@@ -166,7 +166,10 @@ class BrainControl:
             "enabled": gate.enabled,
             "state": gate.state(),
             "phrase": gate.phrase,
-            "model": gate._model_arg,
+            # Stripped display form, NOT the raw VOICE_WAKE_WORD_MODEL arg: it has to
+            # compare equal to an entry in `models` below or the panel's dropdown can't
+            # mark the active model. See WakewordGate.model_name.
+            "model": gate.model_name,
             "models": gate.available_models(),
         }
 

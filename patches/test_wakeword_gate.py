@@ -316,6 +316,80 @@ def test_set_model_garbage_name_rejected_and_unchanged(monkeypatch):
     assert gate._model_arg == original_arg
 
 
+# ── model_name / set_model round trip (raw vs stripped reconciliation) ──
+
+
+def test_model_name_is_the_stripped_form_for_a_custom_path(monkeypatch):
+    """`model_name` is what the settings panel compares against `models`, so it
+    must be stripped even when VOICE_WAKE_WORD_MODEL is a full .onnx path."""
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", "/opt/models/my_wake_v1.0.onnx")
+    gate = wg.WakewordGate()
+
+    assert gate.model_name == "my_wake"
+    assert gate._model_arg == "/opt/models/my_wake_v1.0.onnx"
+
+
+def test_model_name_appears_in_available_models(monkeypatch, tmp_path):
+    """The dropdown can only mark an active entry if the reported model is one of
+    the offered ones. available_models() always includes the current model."""
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(tmp_path / "my_wake_v1.0.onnx"))
+    gate = wg.WakewordGate()
+
+    assert gate.model_name in gate.available_models()
+
+
+def test_set_model_with_own_display_name_preserves_custom_path(monkeypatch, tmp_path):
+    """The round trip that used to break a custom model: the panel reports the
+    stripped name, the user re-selects it, and the bare basename gets stored --
+    leaving a name openWakeWord cannot resolve from disk. It must stay a path."""
+    custom = tmp_path / "my_wake_v1.0.onnx"
+    custom.write_bytes(b"")
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "my_wake"])
+
+    ok, err = gate.set_model(gate.model_name)
+
+    assert ok is True
+    assert err == ""
+    assert gate._model_arg == str(custom)  # NOT "my_wake"
+    assert gate.model_name == "my_wake"
+
+
+def test_set_model_with_own_display_name_still_reloads_and_rearms(monkeypatch, tmp_path):
+    """Preserving the path must not cost the explicit-user-action semantics: the
+    model is still dropped for a lazy reload and the gate still goes back to sleep."""
+    custom = tmp_path / "my_wake_v1.0.onnx"
+    custom.write_bytes(b"")
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["my_wake"])
+    monkeypatch.setattr(gate, "_load_model", lambda: FakeModel(score=0.9))
+    gate.feed(_silence(wg._FRAME_SAMPLES))
+    assert gate.awake is True
+
+    ok, _ = gate.set_model("my_wake")
+
+    assert ok is True
+    assert gate._model is None
+    assert gate.awake is False
+
+
+def test_set_model_to_a_different_known_name_still_swaps(monkeypatch, tmp_path):
+    """The identity shortcut must not swallow a real change away from a custom path."""
+    custom = tmp_path / "my_wake_v1.0.onnx"
+    custom.write_bytes(b"")
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "my_wake"])
+
+    ok, err = gate.set_model("hey_jarvis")
+
+    assert ok is True
+    assert err == ""
+    assert gate._model_arg == "hey_jarvis"
+
+
 # ── available_models() ────────────────────────────────────────────────
 
 

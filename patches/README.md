@@ -334,7 +334,51 @@ WebSocket — need to run over TLS to fix this.
    cert fails to load, the service logs the error and continues serving
    plain `ws` only; a bad cert never takes down the voice pipeline.
 
-4. **`localhost` needs none of this** — plain `http`/`ws` on `localhost` is
+4. **Make sure the client dials the port the server is listening on.** This
+   is the one step that used to be silently missing, and it is the trap worth
+   reading twice: **`VOICE_WSS_PORT` is server-side configuration the browser
+   cannot see.** If the two disagree, the page loads fine, the mic permission
+   prompt succeeds, and the socket simply never connects.
+
+   With no configuration, the webclient derives the socket URL from its own
+   address: `wss://<page-host>:8443` when the page is HTTPS, and
+   `ws://<page-host>:8765` when it is HTTP. Those match the pipeline's
+   defaults, so if you left `VOICE_WSS_PORT` alone there is nothing to do.
+
+   If your socket is anywhere else — a different port, a different host, or
+   behind a reverse proxy — tell the client explicitly. Two equivalent ways:
+
+   - **Settings panel → "Server socket URL"**, e.g.
+     `wss://192.168.1.50:9443`. Stored in that browser's `localStorage`;
+     "Use default" clears it and returns to the derived URL.
+   - **`?ws=` query parameter**, e.g.
+     `https://192.168.1.50:8771/?ws=wss://192.168.1.50:9443`. Handy for a
+     one-off or for sharing a working link; it is persisted the same way, so
+     later visits without the parameter keep using it.
+
+   A failed connection now names the URL it tried and the likely cause, both
+   in the diagnostics log and next to that settings field. **There is
+   deliberately no fallback from `wss://` to `ws://`**: an HTTPS page is
+   forbidden by the browser's mixed-content rules from opening a plain `ws://`
+   socket, so a fallback could only ever fail more slowly and with a worse
+   error message.
+
+5. **A reverse proxy is a fine alternative to native TLS.** If something
+   already terminates TLS in front of the box — Tailscale Serve, Caddy,
+   nginx — you can skip `VOICE_WS_CERTFILE`/`VOICE_WS_KEYFILE` entirely and
+   have the proxy forward a public port to the plain listener on
+   `localhost:8765`. The same rule applies: whatever port the proxy publishes
+   is the port the client must dial, so either publish `8443` (the client's
+   default for HTTPS pages) or set the socket URL as in step 4. For example,
+   this pair serves the page at the root and the socket on the default port,
+   with no certs configured on the pipeline at all:
+
+   ```bash
+   tailscale serve --bg --https 443 http://localhost:8770
+   tailscale serve --bg --https 8443 http://localhost:8765
+   ```
+
+6. **`localhost` needs none of this** — plain `http`/`ws` on `localhost` is
    already a secure context, so the mic works there with no cert setup at
    all.
 

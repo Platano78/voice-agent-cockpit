@@ -89,6 +89,16 @@ class WakewordGate:
         ``"hey_jarvis"`` -> ``"hey jarvis"``."""
         return self._strip_model_suffix(self._model_arg).replace("_", " ")
 
+    @property
+    def model_name(self) -> str:
+        """Display/selection key for the configured model: the same stripped
+        form :meth:`available_models` returns, so the settings-panel dropdown
+        can match the active entry by plain equality. The raw
+        ``VOICE_WAKE_WORD_MODEL`` value (which may be a full ``.onnx`` path)
+        stays internal -- selecting this name back via :meth:`set_model` is
+        recognised as the current model and preserves it verbatim."""
+        return self._strip_model_suffix(self._model_arg)
+
     @staticmethod
     def _strip_model_suffix(name_or_path: str) -> str:
         """``"/opt/models/hey_jarvis_v0.1.onnx"`` -> ``"hey_jarvis"``: drop the
@@ -139,6 +149,21 @@ class WakewordGate:
         if not isinstance(name_or_path, str) or not name_or_path.strip():
             return False, "wake word model name required"
         name_or_path = name_or_path.strip()
+
+        # Re-selecting the ACTIVE model by its display name -- which is exactly what
+        # the settings panel sends back, since `models` and `model` are both the
+        # stripped form. Handled before the is_known check below because
+        # available_models() always contains the current model's stripped name, so
+        # that check would accept it and clobber _model_arg: for a custom-path model
+        # the bare basename is NOT loadable from disk, turning a working custom wake
+        # word into a broken one on a pure round trip. Still reloads + rearms, so the
+        # explicit-user-action semantics of a normal set_model are unchanged.
+        if name_or_path == self._strip_model_suffix(self._model_arg):
+            with self._lock:
+                self._model = None
+                self._rearm_locked()
+            return True, ""
+
         is_known = name_or_path in self.available_models()
         is_custom_path = name_or_path.endswith((".onnx", ".tflite")) and os.path.isfile(name_or_path)
         if not (is_known or is_custom_path):

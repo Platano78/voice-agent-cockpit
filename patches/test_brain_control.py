@@ -58,13 +58,16 @@ PREDEFINED_UNAVAILABLE_NOTE = "pocket_tts not installed -- _predefined_voices() 
 class _FakeWakewordGate:
     enabled = False
     phrase = "hey_jarvis"
-    _model_arg = "hey_jarvis"
+    # Mirrors the real gate's contract: `model_name` is the stripped display form and
+    # is always one of `available_models()`, even when the raw arg is a custom path.
+    model_name = "my_wake"
+    _model_arg = "/opt/models/my_wake_v1.0.onnx"
 
     def state(self):
         return "off"
 
     def available_models(self):
-        return []
+        return ["hey_jarvis", "my_wake"]
 
 
 class _FakeStreamer:
@@ -97,6 +100,26 @@ def _make_brain_control(tmp_path, **kwargs):
         brains_path=str(brains_path),
         **kwargs,
     )
+
+
+# ── wake-word block: reported model must be selectable in the dropdown ──
+
+
+def test_wake_word_state_model_is_one_of_the_offered_models(tmp_path):
+    """The settings panel marks the active entry by comparing `model` to each of
+    `models`. Reporting the raw VOICE_WAKE_WORD_MODEL (a path, for a custom model)
+    matched nothing, so the dropdown silently showed the FIRST entry as active and
+    misreported the live wake phrase."""
+    bc = _make_brain_control(tmp_path, streamer=_FakeStreamer())
+
+    wake = bc._wake_word_state()
+
+    assert wake["model"] in wake["models"]
+    assert wake["model"] == "my_wake"
+
+
+def test_wake_word_state_none_without_a_streamer(tmp_path):
+    assert _make_brain_control(tmp_path)._wake_word_state() is None
 
 
 # ── voice_delete broadcast (fix #2) ─────────────────────────────────────

@@ -1430,6 +1430,16 @@
     <div class="hint">Used for weather and local time. Sent only to your voice server; the active brain sees an approximate location — including remote brains if you use one.</div>
     <div id="phoneContextStatus" role="status" aria-live="polite"></div>
   </div>
+  <div id="wsUrlBlock">
+    <div class="label">Server socket URL</div>
+    <input type="text" id="wsUrlInput" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <div class="voiceCloneLane">
+      <button type="button" class="panelBtn" id="wsUrlApplyBtn">Reconnect</button>
+      <button type="button" class="panelBtn" id="wsUrlResetBtn">Use default</button>
+    </div>
+    <div class="hint">Where the voice pipeline's websocket lives. Leave empty to derive it from this page's address. A page served over HTTPS needs a <code>wss://</code> URL — the browser blocks plain <code>ws://</code> from one.</div>
+    <div id="wsUrlStatus" role="status" aria-live="polite"></div>
+  </div>
   <details id="voiceCloneAdvanced" hidden>
     <summary><span class="chev" aria-hidden="true">▸</span>Advanced — custom voice</summary>
     <div class="label">Your custom voices</div>
@@ -1558,9 +1568,37 @@
 "use strict";
 
 // ── Config ───────────────────────────────────────────────────────────
-// Derive ws host at runtime so the SAME page works via LAN IP (desktop)
-// and Tailscale MagicDNS name / IP (phone). Never hardcode the host.
-const WS_URL = window.location.protocol === "https:" ? `wss://${window.location.hostname}:8443` : `ws://${window.location.hostname}:8765`;
+// Socket URL, resolved fresh on every connect attempt in this order:
+//   1. ?ws=<url> in the page URL — one-shot override, persisted so a reload keeps it
+//   2. localStorage — the "Server socket URL" field in the settings panel
+//   3. derived from this page's own address (host + protocol), ports below
+// The derived default assumes the socket lives on the SAME host as the page, on
+// VOICE_WS_PORT for plain ws and VOICE_WSS_PORT for wss. Both of those are
+// server-side env vars the client cannot see, so any deployment that changes one
+// MUST set the URL explicitly here — that mismatch (server-configurable port,
+// client-hardcoded port) is exactly what used to make the HTTPS lane fail with no
+// error anywhere. See patches/README.md "Remote access / HTTPS".
+const WS_URL_KEY = "va-ws-url";
+const DEFAULT_WS_PORT = 8765;    // websocket_streamer plain listener (VOICE_WS_PORT)
+const DEFAULT_WSS_PORT = 8443;   // websocket_streamer TLS listener (VOICE_WSS_PORT)
+
+function defaultWsUrl() {
+  const secure = window.location.protocol === "https:";
+  return `${secure ? "wss" : "ws"}://${window.location.hostname}:${secure ? DEFAULT_WSS_PORT : DEFAULT_WS_PORT}`;
+}
+function storedWsUrl() {
+  try { return localStorage.getItem(WS_URL_KEY) || ""; } catch { return ""; }
+}
+function resolveWsUrl() {
+  let override = "";
+  try { override = new URLSearchParams(window.location.search).get("ws") || ""; } catch {}
+  if (override) {
+    try { localStorage.setItem(WS_URL_KEY, override); } catch {}
+    return override;
+  }
+  return storedWsUrl() || defaultWsUrl();
+}
+let WS_URL = resolveWsUrl();
 const TARGET_RATE = 16000;
 const TAIL_SILENCE_SEC = 1.0; // ~1s of int16 zeros to trip server-side VAD end-of-turn
 
@@ -1604,6 +1642,10 @@ const els = {
   personaDeleteBtn: document.getElementById("personaDeleteBtn"),
   voiceLabel: document.getElementById("voiceLabel"),
   voiceSelect: document.getElementById("voiceSelect"),
+  wsUrlInput: document.getElementById("wsUrlInput"),
+  wsUrlApplyBtn: document.getElementById("wsUrlApplyBtn"),
+  wsUrlResetBtn: document.getElementById("wsUrlResetBtn"),
+  wsUrlStatus: document.getElementById("wsUrlStatus"),
   wakeWordBlock: document.getElementById("wakeWordBlock"),
   wakeToggle: document.getElementById("wakeToggle"),
   wakeModelSelect: document.getElementById("wakeModelSelect"),
@@ -2694,21 +2736,29 @@ els.applyPersonaBtn.addEventListener("click", () => {
     }
   }
 });
+// Local half of a chat reset. Called by the Reset button AND by the config_ack
+// `chat_reset` flag, so a reset the SERVER decided on (brain switch, persona change)
+// clears the same things — otherwise the history rail keeps rendering turns the brain
+// has already forgotten, and the user reads context that no longer exists.
+function clearChatLocal(note) {
+  document.documentElement.setAttribute("data-mood", "neutral");
+  if (els.sessionMood) els.sessionMood.textContent = "neutral";
+  window.__avatarMood?.("neutral"); // this path bypasses applyMoodFromTools — keep the avatar in sync too
+
+  els.transcript.textContent = "—";
+  els.assistant.textContent = note || "—";
+  pendingHistoryEntry = null;
+  conversationHistory = [];
+  renderHistory();
+}
+
 const resetChatBtnLabel = els.resetChatBtn.textContent;
 let resetChatFlashGuard = false;
 els.resetChatBtn.addEventListener("click", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", reset_chat: true }));
   }
-  document.documentElement.setAttribute("data-mood", "neutral");
-  if (els.sessionMood) els.sessionMood.textContent = "neutral";
-  window.__avatarMood?.("neutral"); // this handler bypasses applyMoodFromTools — keep the avatar in sync too
-
-  els.transcript.textContent = "—";
-  els.assistant.textContent = "—";
-  pendingHistoryEntry = null;
-  conversationHistory = [];
-  renderHistory();
+  clearChatLocal();
 
   if (!resetChatFlashGuard) {
     resetChatFlashGuard = true;
@@ -2739,6 +2789,31 @@ els.wakeModelSelect.addEventListener("change", () => {
     ws.send(JSON.stringify({ type: "config_set", wake_word_model: els.wakeModelSelect.value }));
   }
 });
+
+// ── Server socket URL (device-local, like the theme — never round-tripped) ──
+// Deliberately NOT a config_set: this is how the browser reaches the server in the
+// first place, so it can't come from the server. Blank means "derive from the page".
+els.wsUrlInput.placeholder = defaultWsUrl();
+els.wsUrlInput.value = storedWsUrl();
+
+function applyWsUrl(value) {
+  try {
+    if (value) localStorage.setItem(WS_URL_KEY, value);
+    else localStorage.removeItem(WS_URL_KEY);
+  } catch {}
+  els.wsUrlInput.value = value;
+  els.wsUrlStatus.textContent = "";
+  // Drop the current socket if there is one; its onclose schedules the retry, which
+  // re-resolves the URL. Otherwise (already closed, retry pending) reconnect now.
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    ws.__vaManualClose = true;
+    ws.close();
+  } else {
+    scheduleReconnect(0);
+  }
+}
+els.wsUrlApplyBtn.addEventListener("click", () => applyWsUrl(els.wsUrlInput.value.trim()));
+els.wsUrlResetBtn.addEventListener("click", () => applyWsUrl(""));
 
 // ── Phone context (opt-in; device-local, never routed through config_set) ──
 // Server side: patches/phone_context.py (validation) + websocket_streamer.py (routes
@@ -2920,16 +2995,53 @@ document.addEventListener("visibilitychange", () => {
 
 // ── WebSocket ────────────────────────────────────────────────────────
 let ws = null;
+let reconnectTimer = null;
+
+function scheduleReconnect(ms) {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, ms);
+}
+
+// Why a socket that never opened probably never opened. A failed WebSocket handshake
+// gives JS no status code and no reason string (by design — it would be a cross-origin
+// probe oracle), so the browser console shows one opaque line and the page used to show
+// nothing at all. This is the best actionable guess we can make from what we DO know:
+// the page's own scheme and the URL we dialled.
+function connectFailureHint() {
+  if (window.location.protocol === "https:" && !WS_URL.startsWith("wss://")) {
+    return "This page is HTTPS, so the browser blocks a plain ws:// socket as mixed content. Set a wss:// URL below.";
+  }
+  if (WS_URL.startsWith("wss://")) {
+    return "Nothing accepted a TLS websocket there. Either the voice service has no wss listener (set VOICE_WS_CERTFILE + VOICE_WS_KEYFILE, and VOICE_WSS_PORT must match the port above), or a reverse proxy is supposed to forward that port and isn't, or the port is simply different — correct it below. With a self-signed cert, also open the https:// form of this URL once and accept the warning, or the browser will refuse the socket silently.";
+  }
+  return "Nothing accepted a websocket there. Check the voice service is running and that VOICE_WS_PORT matches the port above.";
+}
+
+function reportConnectFailure() {
+  const hint = connectFailureHint();
+  setStatus("error", "can't reach " + WS_URL);
+  els.pttCaption.textContent = "Not connected";
+  log("ws connect failed: " + WS_URL + " — " + hint);
+  // The diagnostics log is hidden by default, so the status line above carries the
+  // headline and the full hint goes where the fix is: next to the field that sets
+  // the URL.
+  if (els.wsUrlStatus) els.wsUrlStatus.textContent = "Could not connect to " + WS_URL + ". " + hint;
+}
 
 function connect() {
   setStatus("connecting", "connecting…");
   els.ptt.disabled = true;
   els.pttCaption.textContent = "Connecting…";
 
-  ws = new WebSocket(WS_URL);
+  WS_URL = resolveWsUrl();   // pick up a settings-panel change without a page reload
+  const sock = new WebSocket(WS_URL);
+  ws = sock;
+  let opened = false;
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
+    opened = true;
+    if (els.wsUrlStatus) els.wsUrlStatus.textContent = "";
     setStatus("connected", "connected");
     els.ptt.disabled = false;
     els.pttCaption.textContent = "Hold to talk";
@@ -2954,17 +3066,31 @@ function connect() {
     acquireWakeLock();
   };
   ws.onclose = () => {
-    setStatus("error", "disconnected — retrying");
+    // A manual reconnect (settings panel) can leave the OLD socket's close firing
+    // after the new one is already live — don't let it stomp a healthy connection.
+    if (ws !== sock) return;
     els.ptt.disabled = true;
-    els.pttCaption.textContent = "Reconnecting…";
-    log("ws closed; retrying in 2s");
+    if (sock.__vaManualClose) {
+      // We closed it ourselves to switch URLs — not a failure of the old one, and
+      // reporting it as one would blame a URL the user has already replaced.
+      setStatus("connecting", "connecting…");
+      els.pttCaption.textContent = "Connecting…";
+      log("ws url changed; reconnecting");
+    } else if (opened) {
+      setStatus("error", "disconnected — retrying");
+      els.pttCaption.textContent = "Reconnecting…";
+      log("ws closed; retrying in 2s");
+    } else {
+      // Never reached OPEN: this is a configuration problem, not a blip. Say so.
+      reportConnectFailure();
+    }
     releaseWakeLock();
     stallWatchdog.disarm();
     // Stop any live open-mic streaming and reset the mode flag itself (not just the
     // graph) so the next config_state after reconnect sees a real off→on transition
     // and re-arms cleanly, instead of no-op'ing against a stale "already on" flag.
     if (openMic) { openMic = false; openMicStreaming = false; resetWaveform(); teardownMic(); }
-    setTimeout(connect, 2000);
+    scheduleReconnect(sock.__vaManualClose ? 0 : 2000);
   };
   ws.onerror = () => { log("ws error"); };
   ws.onmessage = (ev) => {
@@ -3221,6 +3347,16 @@ function handleEvent(text) {
       }
       if (ev.ok) {
         log(`brain=${ev.active_brain} model=${ev.model}`);
+        if (ev.chat_reset) {
+          // The server cleared its chat history (brain switch, persona change, or our
+          // own Reset button). Mirror it, and SAY so: for the button the user asked and
+          // gets the "Reset ✓" flash, but for a brain/persona switch the turns vanishing
+          // is a side effect they didn't ask for and would otherwise read as a bug. The
+          // note lands in the assistant pane — the pane that just went blank — and the
+          // next real reply overwrites it.
+          clearChatLocal("— chat history cleared (the brain no longer has the earlier turns)");
+          log("chat history cleared by server");
+        }
         if (ev.model) lastKnownModel = ev.model;
         if (typeof ev.tools_armed === "number" && els.sessionTools) {
           els.sessionTools.textContent = ev.tools_armed + " armed";
