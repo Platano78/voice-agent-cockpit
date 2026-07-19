@@ -24,6 +24,31 @@ from speech_to_speech.wakeword_gate import WakewordGate
 
 logger = logging.getLogger(__name__)
 
+# Echo gate (default OFF, see echo_gate.py). Imported defensively: unlike the
+# other patch modules this one is new, so a box whose patch pack predates it
+# would otherwise fail to import the streamer entirely. Degrade to an inert
+# gate instead -- the same fail-open rule the gate itself follows internally.
+try:
+    from speech_to_speech.echo_gate import EchoGate
+except Exception:  # pragma: no cover - only on a box missing the module
+    logger.warning("echo_gate module unavailable; running with echo gating permanently disabled")
+
+    class EchoGate:  # type: ignore[no-redef]
+        enabled = False
+
+        def note_playback(self, pcm: bytes) -> None:
+            pass
+
+        def feed(self, pcm: bytes) -> bool:
+            return True
+
+        def reset(self) -> None:
+            pass
+
+        def state(self) -> str:
+            return "off"
+
+
 # Camera-vision: the webclient streams frames as {"type":"camera_frame","data":<b64 jpeg>};
 # we write the latest to this tmpfs path for the `look` voice tool to read. Rate-limited +
 # size-capped, atomic replace, best-effort (never fatal to the audio loop).
@@ -82,6 +107,10 @@ class WebSocketStreamer:
         self._last_cam_write = 0.0
         self._last_screen_write = 0.0
         self.wakeword_gate = WakewordGate()
+        # Echo gate: scores incoming mic audio against the TTS we just sent so
+        # barge-in can work. Default OFF -- with VOICE_ECHO_GATE unset this is
+        # an inert pass-through and costs nothing on either path.
+        self.echo_gate = EchoGate()
         # Custom voice cloning: chunk frames are buffered here (bytes only,
         # no model work) keyed by client identity; only `voice_clone_begin`
         # (validation) and `voice_clone_end` (assembled bytes + the actual
@@ -236,6 +265,11 @@ class WebSocketStreamer:
                         while len(recv_buffer) >= chunk_size_bytes:
                             chunk = bytes(recv_buffer[:chunk_size_bytes])
                             del recv_buffer[:chunk_size_bytes]
+                            # Echo gate: drop chunks that are just our own TTS
+                            # bleeding back through the mic. Inert (returns
+                            # True immediately) unless VOICE_ECHO_GATE is set.
+                            if not self._echo_pass(chunk):
+                                continue
                             self.input_queue.put(chunk)
                             num_chunks += 1
                         logger.debug(f"Client {client_id}: Queued {num_chunks} chunks for processing")
@@ -284,6 +318,15 @@ class WebSocketStreamer:
                 logger.debug("Last WebSocket client disconnected, ending session")
                 self.input_queue.put(SESSION_END)
                 self.wakeword_gate.reset()
+                # The playback reference and the locked echo delay describe
+                # THIS session's audio path (this client's speaker, mic and
+                # buffering). Carrying either into the next session would
+                # score fresh mic audio against a dead reference at a lag
+                # that no longer holds, so re-acquire from scratch.
+                try:
+                    self.echo_gate.reset()
+                except Exception:
+                    logger.debug("echo gate reset failed", exc_info=True)
 
     def broadcast_wakeword_state(self) -> None:
         """Push the current wake-word gate status to every connected client.
@@ -426,6 +469,34 @@ class WebSocketStreamer:
         except Exception as e:
             logger.debug("screen_frame write failed: %r", e)
 
+    def _echo_pass(self, chunk: bytes) -> bool:
+        """True if `chunk` should reach VAD/ASR. Wraps `EchoGate.feed` so the
+        receive loop can never be broken by the gate: `feed` already fails
+        open internally, and this catches anything it somehow doesn't (e.g. a
+        no-op stand-in whose contract drifts). Deafness to the user is the one
+        failure this pipeline must not have."""
+        try:
+            return self.echo_gate.feed(chunk)
+        except Exception:
+            logger.debug("echo gate feed failed; passing audio", exc_info=True)
+            return True
+
+    async def _broadcast_audio(self, data: bytes) -> None:
+        """Send one chunk of TTS audio to every client, and record it as the
+        echo gate's playback reference.
+
+        Every outbound-audio path in `_send_loop` goes through here on
+        purpose: the gate decides "is this mic audio explained by what we just
+        played?", so a send site that skipped `note_playback` would leave a
+        hole in the reference, and the echo from that hole would correlate
+        against nothing and be passed through as if it were user speech.
+        Funnelling the sends makes that omission impossible to reintroduce."""
+        try:
+            self.echo_gate.note_playback(data)
+        except Exception:
+            logger.debug("echo gate note_playback failed", exc_info=True)
+        await asyncio.gather(*[client.send(data) for client in self.clients], return_exceptions=True)
+
     async def _send_loop(self) -> None:
         """Send audio and text from queues to all connected clients."""
         # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
@@ -441,20 +512,14 @@ class WebSocketStreamer:
                         if audio_buffer and self.clients:
                             data = bytes(audio_buffer)
                             audio_buffer.clear()
-                            await asyncio.gather(
-                                *[client.send(data) for client in self.clients],
-                                return_exceptions=True,
-                            )
+                            await self._broadcast_audio(data)
                         break
                     if isinstance(audio_chunk, bytes) and audio_chunk == AUDIO_RESPONSE_DONE:
                         if audio_buffer and self.clients:
                             data = bytes(audio_buffer)
                             audio_buffer.clear()
                             turn_stats.mark("first_audio_out")
-                            await asyncio.gather(
-                                *[client.send(data) for client in self.clients],
-                                return_exceptions=True,
-                            )
+                            await self._broadcast_audio(data)
                         self.should_listen.set()
                         logger.debug("Response complete, listening re-enabled")
                         continue
@@ -482,9 +547,7 @@ class WebSocketStreamer:
                             audio_buffer.clear()
                             logger.debug(f"Sending {len(data)} bytes of audio to {len(self.clients)} client(s)")
                             turn_stats.mark("first_audio_out")
-                            await asyncio.gather(
-                                *[client.send(data) for client in self.clients], return_exceptions=True
-                            )
+                            await self._broadcast_audio(data)
                 except Empty:
                     # Flush any buffered audio when queue is empty
                     if audio_buffer and self.clients:
@@ -492,7 +555,7 @@ class WebSocketStreamer:
                         audio_buffer.clear()
                         logger.debug(f"Flushing {len(data)} bytes of audio to {len(self.clients)} client(s)")
                         turn_stats.mark("first_audio_out")
-                        await asyncio.gather(*[client.send(data) for client in self.clients], return_exceptions=True)
+                        await self._broadcast_audio(data)
 
                 # Check for text/tool messages
                 if self.text_output_queue:
