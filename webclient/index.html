@@ -841,8 +841,8 @@
     padding: 8px;
     font: 13px/1.4 inherit;
   }
-  #voiceCloneAdvanced { margin-top: 10px; }
-  #voiceCloneAdvanced summary {
+  #voiceCloneAdvanced, #wsUrlAdvanced { margin-top: 10px; }
+  #voiceCloneAdvanced summary, #wsUrlAdvanced summary {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -860,17 +860,17 @@
     background: var(--bg);
     list-style: none; /* Firefox's own marker — display:flex already drops Chrome's; we draw a chevron ourselves */
   }
-  #voiceCloneAdvanced summary::-webkit-details-marker { display: none; }
-  #voiceCloneAdvanced summary:hover { background: var(--border); color: var(--accent); }
-  #voiceCloneAdvanced summary .chev {
+  #voiceCloneAdvanced summary::-webkit-details-marker, #wsUrlAdvanced summary::-webkit-details-marker { display: none; }
+  #voiceCloneAdvanced summary:hover, #wsUrlAdvanced summary:hover { background: var(--border); color: var(--accent); }
+  #voiceCloneAdvanced summary .chev, #wsUrlAdvanced summary .chev {
     display: inline-block;
     font-size: 10px;
     color: var(--text-muted);
     transition: transform 0.15s ease;
   }
-  #voiceCloneAdvanced[open] summary .chev { transform: rotate(90deg); }
+  #voiceCloneAdvanced[open] summary .chev, #wsUrlAdvanced[open] summary .chev { transform: rotate(90deg); }
   @media (prefers-reduced-motion: reduce) {
-    #voiceCloneAdvanced summary .chev { transition: none; }
+    #voiceCloneAdvanced summary .chev, #wsUrlAdvanced summary .chev { transition: none; }
   }
   #voiceCloneList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
   .voiceCloneRow {
@@ -1461,16 +1461,19 @@
     <div class="hint">Used for weather and local time. Sent only to your voice server; the active brain sees an approximate location — including remote brains if you use one.</div>
     <div id="phoneContextStatus" role="status" aria-live="polite"></div>
   </div>
-  <div id="wsUrlBlock">
-    <div class="label">Server socket URL</div>
-    <input type="text" id="wsUrlInput" autocomplete="off" spellcheck="false" autocapitalize="off">
-    <div class="voiceCloneLane">
-      <button type="button" class="panelBtn" id="wsUrlApplyBtn">Reconnect</button>
-      <button type="button" class="panelBtn" id="wsUrlResetBtn">Use default</button>
+  <details id="wsUrlAdvanced">
+    <summary><span class="chev" aria-hidden="true">▸</span>Advanced — connection</summary>
+    <div id="wsUrlBlock">
+      <div class="label">Server socket URL</div>
+      <input type="text" id="wsUrlInput" autocomplete="off" spellcheck="false" autocapitalize="off">
+      <div class="voiceCloneLane">
+        <button type="button" class="panelBtn" id="wsUrlApplyBtn">Reconnect</button>
+        <button type="button" class="panelBtn" id="wsUrlResetBtn">Use default</button>
+      </div>
+      <div class="hint">Where the voice pipeline's websocket lives. Leave empty to derive it from this page's address. A page served over HTTPS needs a <code>wss://</code> URL — the browser blocks plain <code>ws://</code> from one.</div>
+      <div id="wsUrlStatus" role="status" aria-live="polite"></div>
     </div>
-    <div class="hint">Where the voice pipeline's websocket lives. Leave empty to derive it from this page's address. A page served over HTTPS needs a <code>wss://</code> URL — the browser blocks plain <code>ws://</code> from one.</div>
-    <div id="wsUrlStatus" role="status" aria-live="polite"></div>
-  </div>
+  </details>
   <details id="voiceCloneAdvanced" hidden>
     <summary><span class="chev" aria-hidden="true">▸</span>Advanced — custom voice</summary>
     <div class="label">Your custom voices</div>
@@ -1679,6 +1682,7 @@ const els = {
   personaScopeBrainBtn: document.getElementById("personaScopeBrainBtn"),
   voiceLabel: document.getElementById("voiceLabel"),
   voiceSelect: document.getElementById("voiceSelect"),
+  wsUrlAdvanced: document.getElementById("wsUrlAdvanced"),
   wsUrlInput: document.getElementById("wsUrlInput"),
   wsUrlApplyBtn: document.getElementById("wsUrlApplyBtn"),
   wsUrlResetBtn: document.getElementById("wsUrlResetBtn"),
@@ -3228,6 +3232,9 @@ function reportConnectFailure() {
   // headline and the full hint goes where the fix is: next to the field that sets
   // the URL.
   if (els.wsUrlStatus) els.wsUrlStatus.textContent = "Could not connect to " + WS_URL + ". " + hint;
+  // This fires from an automatic (re)connect attempt, not a user action — if the field
+  // that fixes it is sitting collapsed, the failure is invisible. Force it open.
+  if (els.wsUrlAdvanced) els.wsUrlAdvanced.open = true;
 }
 
 function connect() {

@@ -1,5 +1,6 @@
 # Secrets / host-specific config
 brains.json
+webclient/certs/
 
 # Non-redistributable avatar assets (images + local-only refs — see NOTICE)
 webclient/avatar/refs/
