@@ -411,13 +411,110 @@ def test_probe_health_is_false_on_error(monkeypatch):
     assert vt._probe_health("") is False
 
 
-def test_no_decision_lookup_tool_is_shipped():
-    """Faulkner's only local surface (/api/search on :8086) ANDs every word of
-    the query with no ranking, so natural-language decision questions match
-    nothing -- 'why did we choose two processes' returns 0 nodes live. Shipping
-    it would answer 'I didn't find a recorded decision' to almost everything."""
-    assert "decision_lookup" not in vt._DISPATCH
-    assert "decision_lookup" not in [t["name"] for t in vt.TOOL_DEFS]
+def test_faulkner_arms_on_health_and_disarms_when_down(monkeypatch):
+    monkeypatch.delenv("VOICE_TOOLS", raising=False)
+    monkeypatch.setattr(vt, "_probe", lambda url, payload: False)
+
+    monkeypatch.setattr(vt, "_probe_health", lambda url: True)
+    assert "decision_lookup" in [t["name"] for t in vt.get_tool_defs()]
+
+    monkeypatch.setattr(vt, "_probe_health", lambda url: False)
+    assert "decision_lookup" not in [t["name"] for t in vt.get_tool_defs()]
+
+
+# ── decision_lookup (Faulkner) ───────────────────────────────────────────
+
+class _FakeFaulkner:
+    """Records each /api/search query and replies per-query."""
+
+    def __init__(self, by_query):
+        self.by_query = by_query
+        self.queries = []
+
+    def __call__(self, *a, **kw):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, params=None, **kwargs):
+        self.queries.append(params["q"])
+        return _FakeResponse({"nodes": self.by_query.get(params["q"], [])})
+
+
+def _decision(description, rationale=None, type="Decision"):
+    return {"id": "D-1", "type": type, "description": description, "rationale": rationale}
+
+
+def test_decision_lookup_speaks_description_and_rationale(monkeypatch):
+    monkeypatch.setattr(vt.httpx, "Client", _FakeFaulkner({
+        "two processes": [_decision("Split the APK into two processes.", "lmkd kills processes.")]
+    }))
+
+    out = vt._run_decision_lookup("two processes")
+
+    assert "Decision: Split the APK into two processes. lmkd kills processes." in out
+
+
+def test_decision_lookup_ignores_non_decision_nodes(monkeypatch):
+    monkeypatch.setattr(vt.httpx, "Client", _FakeFaulkner({
+        "q": [_decision("a pattern", type="Pattern"), _decision("the real decision")]
+    }))
+
+    out = vt._run_decision_lookup("q")
+
+    assert "the real decision" in out
+    assert "a pattern" not in out
+
+
+def test_sentence_query_retries_with_content_words_only(monkeypatch):
+    """/api/search ANDs every term, so the full question matches nothing while
+    its content words match -- verified live: 0 nodes vs 36."""
+    fake = _FakeFaulkner({"two processes": [_decision("Split the APK.")]})
+    monkeypatch.setattr(vt.httpx, "Client", fake)
+
+    out = vt._run_decision_lookup("why is it two processes")
+
+    assert fake.queries == ["why is it two processes", "two processes"]
+    assert "Split the APK." in out
+
+
+def test_no_retry_when_the_first_search_already_matched(monkeypatch):
+    """The retry may add recall but must never reorder a working result set."""
+    fake = _FakeFaulkner({"why is it two processes": [_decision("Found first try.")]})
+    monkeypatch.setattr(vt.httpx, "Client", fake)
+
+    vt._run_decision_lookup("why is it two processes")
+
+    assert fake.queries == ["why is it two processes"]
+
+
+def test_decision_lookup_failure_is_non_blocking(monkeypatch):
+    monkeypatch.setattr(vt.httpx, "Client", _FakeHTTP(post=RuntimeError("down")))
+    # A transport error must surface as plain speech, never raise into the
+    # audio thread.
+    assert "didn't find a recorded decision" in vt._run_decision_lookup("anything")
+
+
+def test_the_two_knowledge_tools_point_at_each_other():
+    assert "decision_lookup" in vt._DISPATCH
+    descriptions = {t["name"]: t["description"] for t in vt.TOOL_DEFS}
+    # The two tools overlap in subject matter, so each description must name
+    # the other explicitly or the LLM will mis-route between them.
+    assert "decision_lookup" in descriptions["knowledge_lookup"]
+    assert "knowledge_lookup" in descriptions["decision_lookup"]
+
+
+def test_decision_query_param_documents_the_keyword_requirement():
+    """The AND-substring backend is only usable if the model sends keywords,
+    so the parameter description is load-bearing, not decoration."""
+    tool = next(t for t in vt.TOOL_DEFS if t["name"] == "decision_lookup")
+    param = tool["parameters"]["properties"]["query"]["description"].lower()
+    assert "keyword" in param
+    assert "not a question" in param or "not a sentence" in param
 
 
 # ── result budget + speakability ─────────────────────────────────────────

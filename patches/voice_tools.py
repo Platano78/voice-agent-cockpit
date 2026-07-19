@@ -32,16 +32,19 @@ _MAX_RESULT_CHARS = 600
 # spoken sentences — so the budget is set by "enough to answer accurately"
 # rather than by what is speakable.
 _KNOWLEDGE_RESULT_CHARS = 1800
+_DECISION_RESULT_CHARS = 1200
 
 # Per-document excerpt budget inside knowledge_lookup.
 _DOC_EXCERPT_CHARS = 450
 _CONVO_EXCERPT_CHARS = 280
+_DECISION_EXCERPT_CHARS = 350
 
 # How many QMD hits to actually fetch content for. 1 is too few — the live
 # "echo gate" query ranks a marginal hit first — and 3+ doubles latency while
 # diluting the answer. get() costs ~10ms once query has run, so 2 is cheap.
 _KNOWLEDGE_DOCS = 2
 _KNOWLEDGE_CONVOS = 2
+_DECISION_HITS = 3
 
 # Window fetched around each hit's `line`. Back 6 lines to pick up the heading
 # above the match; forward far enough for a full short section. The char cap
@@ -53,12 +56,18 @@ _WEATHER_TIMEOUT_S = 6.0
 _KNOWLEDGE_TIMEOUT_S = 6.0
 # Per-backend budgets inside the parallel fan-out. They run concurrently, so
 # the wall clock is max(), not sum() — comfortably inside the 6s tool deadline.
-_QMD_TIMEOUT_S = 4.0
-_GENESIS_TIMEOUT_S = 3.0
+# Every knowledge backend is a container on this same box, so these are
+# loopback budgets, not network ones. Measured on the live box: QMD query
+# ~0.15s and get ~0.01s, Genesis /search ~0.09s, Faulkner /api/search ~0.002s.
+# Each is set well above its measurement to absorb a cold container, and well
+# below what a person would notice mid-sentence.
+_QMD_TIMEOUT_S = 2.0
+_GENESIS_TIMEOUT_S = 1.5
+_DECISION_TIMEOUT_S = 1.5
 # Wall clock the whole fan-out gets, shared across both lanes. Sits under the
 # 6s tool deadline so a slow backend degrades to partial results rather than
 # tripping execute()'s "timed out" refusal.
-_FANOUT_BUDGET_S = 4.5
+_FANOUT_BUDGET_S = 2.5
 _SEARCH_TIMEOUT_S = 10.0
 _MOOD_TIMEOUT_S = 2.0
 _HERMES_DELEGATE_TIMEOUT_S = 3.0
@@ -88,7 +97,12 @@ _KNOWLEDGE_COLLECTIONS = [
 # alongside QMD — plain HTTP REST, no auth, loopback. The MCP gateway on the
 # user's desktop is only a wrapper around this same API, so the voice agent
 # talks to it directly and skips that hop.
-_GENESIS_URL = os.environ.get("GENESIS_URL", "http://localhost:8080").rstrip("/")
+_GENESIS_URL = os.environ.get("GENESIS_API_URL", "http://localhost:8080").rstrip("/")
+
+# Faulkner-DB's decision graph, also a local container. Its /api/search is a
+# substring filter that ANDs every term with NO relevance ranking, which
+# shapes both the tool description and the retry in _run_decision_lookup().
+_FAULKNER_URL = os.environ.get("FAULKNER_API_URL", "http://localhost:8086").rstrip("/")
 
 # Set by get_tool_defs(): whether knowledge_lookup should fan out to Genesis.
 # Genesis is a *contributor* to knowledge_lookup rather than its own tool, so
@@ -201,14 +215,46 @@ TOOL_DEFS: list[dict] = [
             "what state it is in, what was found or measured. Use for ANY "
             "question about the user's own work or setup, even if the phrasing "
             "is approximate or partially misheard. This is the default choice "
-            "for 'what do I know about X', including questions about what was "
-            "decided and why. Returns excerpts from the source documents and "
-            "past conversations; read them and answer in 1-2 spoken sentences."
+            "for 'what do I know about X'. If the user specifically asks what "
+            "was DECIDED and WHY — a choice between options, a tradeoff, a "
+            "rejected alternative — use decision_lookup instead. Returns "
+            "excerpts from the source documents and past conversations; read "
+            "them and answer in 1-2 spoken sentences."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What to look up."}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "decision_lookup",
+        "description": (
+            "Look up a recorded ARCHITECTURAL DECISION and its rationale — why "
+            "one approach was chosen over another, what tradeoff was accepted, "
+            "what was rejected and why. Use ONLY when the user asks about a "
+            "decision, choice, or rationale ('why did we', 'what did we "
+            "decide', 'why is it built that way'). For factual questions about "
+            "how something works or what its current state is, use "
+            "knowledge_lookup instead. Answer in 1-2 spoken sentences."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Two to four KEYWORDS naming the subject, not a "
+                        "question and not a sentence — this search requires "
+                        "every word to appear, so extra words return nothing. "
+                        "For 'why did we split it into two processes?' pass "
+                        "'two processes'. For 'what did we decide about the "
+                        "voice pipeline?' pass 'voice pipeline'."
+                    ),
+                }
             },
             "required": ["query"],
         },
@@ -317,6 +363,7 @@ TOOL_DEFS: list[dict] = [
 # backing service is actually reachable at pipeline start.
 CORE_TOOLS = ("get_weather", "web_search", "set_mood")
 QMD_TOOLS = ("knowledge_lookup",)
+FAULKNER_TOOLS = ("decision_lookup",)
 HERMES_TOOLS = ("delegate_to_hermes", "hermes_status", "respond_permission", "send_to_hermes")
 
 
@@ -574,17 +621,21 @@ def get_tool_defs() -> list[dict]:
     # on every call.
     global _GENESIS_ARMED
     _GENESIS_ARMED = _probe_health(_GENESIS_URL)
+    faulkner_ok = _probe_health(_FAULKNER_URL)
+    if faulkner_ok:
+        names.update(FAULKNER_TOOLS)
 
     armed = [t for t in TOOL_DEFS if t["name"] in names] + dropins
     _ARMED_NAMES.clear()
     _ARMED_NAMES.update(t["name"] for t in armed)
     logger.info(
-        "voice_tools: armed %d/%d (probe: qmd=%s hermes=%s genesis=%s)%s",
+        "voice_tools: armed %d/%d (probe: qmd=%s hermes=%s genesis=%s faulkner=%s)%s",
         len(armed),
         len(catalog),
         "up" if qmd_ok else "down",
         "up" if hermes_ok else "down",
         "up" if _GENESIS_ARMED else "down",
+        "up" if faulkner_ok else "down",
         dropin_suffix,
     )
     return armed
@@ -607,6 +658,7 @@ def _truncate(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
 # needs more room than the default _MAX_RESULT_CHARS.
 _RESULT_CHARS = {
     "knowledge_lookup": _KNOWLEDGE_RESULT_CHARS,
+    "decision_lookup": _DECISION_RESULT_CHARS,
 }
 
 
@@ -803,15 +855,68 @@ def _run_knowledge_lookup(query: str) -> str:
     return " ".join(lines)
 
 
-# NOTE: no decision_lookup tool. Faulkner's only local HTTP surface is the
-# visualization API (`GET :8086/api/search?q=`), which is a substring filter
-# ANDing every word of the query with no relevance ranking. Natural-language
-# decision questions — exactly what an LLM would send — match nothing:
-# `q=why did we choose two processes` returns 0 nodes, while `q=gate` returns
-# 131 unranked ones spanning every project. The richer `query_decisions`
-# hybrid search lives in an MCP server that does not run on this box. Shipping
-# a tool over /api/search would answer "I didn't find a recorded decision" to
-# almost every real question. See the slice report.
+# Words dropped when a full-sentence query returns nothing. Faulkner's
+# /api/search ANDs every term, so a spoken question ("why did we choose two
+# processes") matches zero rows while its content words ("two processes")
+# match plenty. This fires ONLY on a zero-result first try, so it can add
+# recall but never reorder a result set that already worked — which is why it
+# is justified here and was rejected for QMD, where it only shuffled ranking.
+_STOPWORDS = frozenset(
+    "a an the is are was were be do does did what which who when where why how of for to "
+    "in on at by with from about our we i my me you your it its this that these those and "
+    "or but if then than so as can could should would will may might must have has had not "
+    "no there their they them again".split()
+)
+
+
+def _content_words(query: str) -> str:
+    kept = [w for w in query.split() if w.lower().strip("?.,!'\"") not in _STOPWORDS]
+    return " ".join(kept)
+
+
+def _faulkner_search(query: str) -> list[dict]:
+    if not query:
+        return []
+    try:
+        with httpx.Client(timeout=_DECISION_TIMEOUT_S) as client:
+            resp = client.get(
+                f"{_FAULKNER_URL}/api/search",
+                params={"q": query, "limit": _DECISION_HITS},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception as e:
+        logger.warning("voice_tools: faulkner search failed: %r", e)
+        return []
+    if not isinstance(payload, dict):
+        return []
+    # The graph holds several node types; only Decision nodes carry a
+    # description/rationale worth speaking.
+    return [
+        n
+        for n in (payload.get("nodes") or [])
+        if isinstance(n, dict) and n.get("type") == "Decision"
+    ]
+
+
+def _run_decision_lookup(query: str) -> str:
+    """Look up recorded architectural decisions in Faulkner-DB."""
+    nodes = _faulkner_search(query)
+    if not nodes:
+        stripped = _content_words(query)
+        if stripped and stripped != query:
+            nodes = _faulkner_search(stripped)
+    lines = []
+    for node in nodes[:_DECISION_HITS]:
+        # description = what was decided, rationale = why. The "why" is the
+        # whole reason this tool exists, so both go to the model.
+        text = " ".join(x for x in (node.get("description"), node.get("rationale")) if x)
+        body = _speakable(text, _DECISION_EXCERPT_CHARS)
+        if body:
+            lines.append(f"Decision: {body}")
+    if not lines:
+        return f"I didn't find a recorded decision about {query!r}."
+    return " ".join(lines)
 
 
 def _run_set_mood(mood: str) -> str:
@@ -856,6 +961,15 @@ _DISPATCH = {
         "query",
         "something to look up",
         "knowledge base lookup",
+        True,
+    ),
+    "decision_lookup": (
+        _run_decision_lookup,
+        # Two sequential searches worst case (first try + content-word retry).
+        _DECISION_TIMEOUT_S * 2,
+        "query",
+        "a decision to look up",
+        "decision lookup",
         True,
     ),
     "set_mood": (_run_set_mood, _MOOD_TIMEOUT_S, "mood", "a mood", "mood change", True),
