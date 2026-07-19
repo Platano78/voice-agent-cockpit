@@ -24,68 +24,251 @@ Decision rule
 raw, to a ring buffer (``_ref_buffer``) covering the last
 ``_REF_MAX_SECONDS`` seconds. :meth:`EchoGate.feed` takes one chunk of
 incoming mic audio and computes the best *normalized* cross-correlation
-coefficient (rho, in [0, 1]) between that chunk and every same-length window
-of the reference buffer -- i.e. it searches every possible delay at once,
-because network jitter and client-side audio buffering mean the echo can
-arrive at an unpredictable, varying offset from when we sent it (see
-"Delay window" below). Normalizing by the energy of both signals makes rho
+coefficient (rho, in [0, 1]) between that chunk and same-length windows of
+the reference buffer. Normalizing by the energy of both signals makes rho
 scale-invariant, so playback volume and mic gain don't matter -- only
 *shape* does.
+
+Crucially, rho is **not** maximized over every possible delay. It is scored
+in a narrow window around a *locked* delay estimate. Why that distinction is
+load-bearing -- and why the first version of this module got it wrong -- is
+the subject of "Delay search: lock, don't scan" below. Read that section
+before changing anything here.
 
 Why this rule handles the barge-in case (the one that matters): if the user
 talks *over* the assistant, the mic signal is (approximately) the echo plus
 an independent, uncorrelated speech signal. For two independent signals of
-comparable energy, textbook correlation algebra says the best-case rho drops
-to roughly ``1 / sqrt(1 + speech_energy / echo_energy)`` -- e.g. ~0.71 at
-equal energy, ~0.34 if the user's voice is *louder* than the echo -- well
-below a pure echo's rho of ~1.0. Verified empirically against the default
-threshold in ``test_echo_gate.py`` (case 4) using independent synthesized
-noise for "echo" and "speech": pure echo scores ~1.0, equal-energy
-speech-over-echo scores ~0.3-0.6, unrelated speech alone (no playback at
-all) sits around ~0.15-0.2 noise floor. That's a comfortable margin either
-side of the default threshold.
+comparable energy, textbook correlation algebra says rho drops to roughly
+``1 / sqrt(1 + speech_energy / echo_energy)`` -- e.g. ~0.71 at equal energy,
+~0.34 if the user's voice is *louder* than the echo -- while a pure echo
+scores ~1.0.
 
-The operating envelope this implies: **the default threshold (0.7) is the
-equal-energy crossover.** A parametrized sweep in ``test_echo_gate.py``
-(``test_speech_over_playback_envelope``) over user-speech-to-echo amplitude
-ratios at the mic, using this exact algorithm, gives:
+Operating envelope
+------------------
+This is a real constraint, separate from the delay-search defect below, and
+it survives the redesign: the gate can only hear a barge-in that is loud
+enough to pull rho below the threshold. Measured on **real audio** under the
+locked narrow search (echo = ``batch1.wav`` at 0.4x with a 100 ms delay,
+user = ``batch3.wav`` scaled to the stated ratio), as percentage of
+barge-in frames that get through:
 
-======================  ========  ========
-user : echo amplitude   best rho  verdict
-======================  ========  ========
-0.25x                   0.969     drop
-0.50x                   0.892     drop
-0.75x                   0.784     drop
-1.00x                   0.697     **pass** (by 0.003 -- the crossover itself)
-1.25x                   0.626     pass
-1.50x                   0.516     pass
-2.00x                   0.429     pass
-======================  ========  ========
+===================  ========  ========  ============  ========
+user : echo at mic   thr 0.70  thr 0.80  thr **0.85**  thr 0.90
+===================  ========  ========  ============  ========
+0.25x                      0%        0%            0%        0%
+0.50x                      0%        0%            0%       69%
+0.75x                      4%       58%           87%       97%
+1.00x                     52%       87%           94%       99%
+1.25x                     76%       91%           94%       99%
+1.50x                     82%       94%           96%       99%
+2.00x                     84%       97%           99%      100%
+===================  ========  ========  ============  ========
 
-In plain terms: **the user must be speaking at least as loud as the echo
-arriving at the mic to interrupt** -- not merely "any perceptible speech
-passes". Below that ratio, the echo's correlation dominates and the gate
-drops the chunk. This bites hardest in **near-field configurations** --
-phone speaker to phone mic, laptop speaker to laptop mic -- where the echo
-path is short and the played-back audio can easily be as loud as, or louder
-than, a normally-spoken interruption at the same mic. That is exactly this
-project's primary deployment shape, so this is not a corner case to note and
-move past. Retuning the threshold against real audio (not synthetic noise)
-is a later slice; the sweep above is preserved as an executable contract in
-``test_echo_gate.py`` specifically so a future retune shows, in one test
-run, exactly what envelope it trades away.
+Note the direction: **raising** the threshold widens the envelope (a higher
+bar to call something echo means more gets through). It is easy to get this
+backwards.
 
-Delay window: the ring buffer cap (``_REF_MAX_SECONDS`` = 2.0s) doubles as
-the delay search window -- ``np.correlate(ref, mic, mode="valid")`` computes
-the dot product at *every* alignment of the mic chunk within the reference
-buffer in one vectorized call, so there's no coarse stride to tune and no
-risk of missing the true lag between a stride step. 2 seconds is generously
-above any realistic network-jitter-plus-client-buffering lag (typically
-tens to a couple hundred milliseconds) while keeping the buffer, and the
-O(ref_len * mic_len) correlation cost, small: ~1.8ms measured for a 512
--sample mic chunk against a full 2s/32000-sample reference on a modern CPU
-core -- against a chunk that represents 32ms of audio, i.e. a few percent of
-one audio-loop tick, nowhere near enough to move the needle on TTFC.
+The default is now **0.85**, raised from 0.7. The old 0.7 was the
+equal-energy crossover: the user had to be at least as loud as the echo at
+the mic to interrupt at all. That bit hardest in **near-field
+configurations** -- phone speaker to phone mic, laptop speaker to laptop
+mic -- which is this project's primary deployment shape. At 0.85 a user at
+0.75x the echo's amplitude gets through 87% of frames, versus 4% at 0.7.
+That is the usability win the redesign buys.
+
+What it costs: a *coloured* echo path scores below 1.000, so a higher
+threshold lets more of it slip. Measured true-echo drop rate by echo
+degradation:
+
+=================  =========  =========  =========
+echo degradation   thr 0.80   thr 0.85   thr 0.90
+=================  =========  =========  =========
+clean (bit-exact)     97.1%      97.1%      97.1%
+noise at -20 dB       97.1%      97.1%      97.1%
+noise at -14 dB       97.1%      97.1%      97.1%
+soft clipping         97.1%      97.1%      97.1%
+1st-order lowpass     96.4%      93.4%      89.1%
+=================  =========  =========  =========
+
+(The residual ~2.9% at every setting is the lock-acquisition window -- the
+first few chunks of a turn pass by design while the delay is unknown.)
+Additive noise and clipping barely dent rho (>=0.977); only spectral
+colouring does, and 0.85 keeps that case above 93%. 0.85 is the balance
+point picked from these two tables. A severely spectrally-distorted echo
+path (a differentiator was tested as an extreme) never clears
+``_LOCK_PEAK_FLOOR`` at all, so the gate simply never locks and passes
+everything -- the fail-open direction.
+
+Both tables are pinned as executable contracts in ``test_echo_gate.py``
+against the real WAVs, so a future retune shows in one test run exactly what
+it trades away.
+
+Delay search: lock, don't scan
+------------------------------
+The first version of this module used the ring buffer cap
+(``_REF_MAX_SECONDS`` = 2.0s) as the delay search window: it took the *max*
+of rho over every alignment of the mic chunk inside the reference buffer,
+on the reasoning that this has "no coarse stride to tune and no risk of
+missing the true lag". **That reasoning was wrong, and the resulting gate
+would have dropped roughly 72% of genuine user speech.**
+
+The error is a multiple-comparisons / extreme-value effect. A 512-sample
+chunk against a 2s reference is a max over ~31,500 candidate alignments.
+Speech is highly self-similar (voiced pitch periods, formant structure,
+repeated phonemes), so *some* alignment of any speech chunk against any
+other speech will happen to line up well. Taking the max over tens of
+thousands of tries reliably finds one. Measured on real pocket-TTS audio,
+correlating ``bench-wavs/batch3.wav`` against an unrelated
+``bench-wavs/batch1.wav`` reference at 512-sample chunks:
+
+=========  ===============  ==================  ====================
+ref window  candidate lags  unrelated-speech    false-drop rate
+                            median rho          at threshold 0.7
+=========  ===============  ==================  ====================
+2.00 s          31,489      0.854               **71.6%**
+1.00 s          15,489      0.763               61.7%
+0.50 s           7,489      0.644               35.5%
+0.20 s           2,689      0.273               2.8%
+0.10 s           1,089      0.248               0.7%
+0.05 s             289      0.179               0.0%
+=========  ===============  ==================  ====================
+
+True-echo rho stays 1.000 at every window size, so this is purely a
+false-positive problem, and **no threshold rescues the wide scan** --
+unrelated speech peaks at 0.98 against a true echo's 1.000. The original
+docstring's claimed "~0.15-0.2 noise floor" for unrelated audio was an
+artifact of testing with *white noise*, which has essentially no
+autocorrelation structure. That floor does reproduce (measured 0.160 on
+synthetic noise) -- real speech simply does not behave like white noise.
+The synthetic tests in ``test_echo_gate.py`` are retained, but relabelled:
+they characterize white-noise behaviour, and are explicitly **not** the
+deployability contract.
+
+The fix is *not* to shrink the ring buffer. The buffer cap and the search
+width were doing two different jobs under one constant, and shrinking it
+would silently disable the gate by discarding the audio the true echo
+actually matches. Measured true-echo rho with a shrunken buffer, by real
+echo delay:
+
+=======  ==============  =====  ======  ======  =======  =======  =======
+buffer   max lag covered  D=0ms  D=20ms  D=50ms  D=100ms  D=150ms  D=200ms
+=======  ==============  =====  ======  ======  =======  =======  =======
+0.05 s        18 ms      1.000  0.942   0.382   0.175    0.354    0.619
+0.10 s        68 ms      1.000  1.000   1.000   0.382    0.354    0.619
+0.20 s       168 ms      1.000  1.000   1.000   1.000    1.000    0.619
+0.50 s       468 ms      1.000  1.000   1.000   1.000    1.000    1.000
+=======  ==============  =====  ======  ======  =======  =======  =======
+
+Real echo delay (network jitter plus client audio buffering) is typically
+100-200 ms, so a 0.05s buffer misses all of it.
+
+So the two roles are now separate constants:
+
+* ``_REF_MAX_SECONDS`` (2.0s) -- **buffer depth**: how much played audio we
+  retain, kept generous so the true echo is always still in the buffer.
+* ``_LAG_SEARCH_SAMPLES`` (400, i.e. +/-25 ms) -- **search width**: how many
+  alignments we actually score. Keeping the candidate-lag count in the low
+  hundreds is what restores discrimination.
+
+Bridging the two is a **lock**, which exploits a fact the wide scan threw
+away: echo delay is a physical property of the audio path and is stable
+within a session, whereas a speech-vs-speech coincidence peak lands at a
+*random* lag that jumps every chunk. Measured in a streaming simulation
+(playback appended in lockstep with mic chunks, lag expressed in absolute
+stream coordinates), consecutive-chunk lag agreement within +/-400 samples:
+
+* true echo, every delay from 0 to 200 ms: **100%** agreement, and the
+  recovered lag equals the true delay exactly
+* unrelated speech: **35.5%** agreement, median jump 736 samples
+
+Note that peak *sharpness* -- peak-to-median ratio of the rho curve, an
+obvious-looking lock criterion -- was measured and **rejected**: it does not
+separate the classes at all (unrelated speech 4.36, true echo 4.36-4.67).
+Lag stability across time is the discriminator; single-chunk peak shape is
+not. Don't re-derive the sharpness test.
+
+The gate therefore runs a small state machine:
+
+* **Unlocked** (no delay estimate yet): run the wide scan to *observe* the
+  argmax lag, but **pass all audio that reaches the correlation step** -- an
+  uncalibrated gate must not drop anything on the strength of a delay it has
+  not established, matching this module's fail-open philosophy. A missed echo
+  is far cheaper than deafness to the user.
+* **Locking**: a chunk whose wide-scan peak clears ``_LOCK_PEAK_FLOOR`` is
+  evidence; ``_LOCK_CONSECUTIVE`` consecutive such chunks agreeing on a lag
+  within ``_LAG_SEARCH_SAMPLES`` establishes the lock. Evidence must be
+  consecutive -- a single sub-floor chunk resets the candidate.
+* **Locked**: score only within +/-``_LAG_SEARCH_SAMPLES`` of the locked lag,
+  and slew the lock to each chunk's argmax so slow drift is tracked.
+* **Unlock** on :meth:`reset`, on reference staleness, and after
+  ``_UNLOCK_CONSECUTIVE`` chunks whose in-window peak falls below
+  ``_UNLOCK_FLOOR`` -- the last case recovers from a lock that has become
+  meaningless, e.g. because the client stopped sending mic frames for a
+  while and the stream-coordinate anchor no longer holds.
+
+**The silence rule is not part of this state machine and is not subject to
+it.** The RMS check in :meth:`_score` runs *before* any lock-state logic and
+returns "drop" in **every** state, unlocked included. It is a separate,
+deliberate policy about what is worth handing to ASR (see the comment at the
+check), not a claim about whether the chunk is echo. "Unlocked passes
+everything" above is scoped to the correlation verdict only. This distinction
+is easy to miss and has already caused one reviewer to measure the silent
+lead-in of a test WAV, see chunks being dropped while unlocked, and file it
+as a contradiction of the fail-open contract -- it is not one.
+
+Design range: <=200 ms, cliff at the buffer depth
+--------------------------------------------------
+Rejection is **flat, not degrading**, across the whole realistic range and
+well beyond it, then falls off a cliff at ``_REF_MAX_SECONDS``. Measured on
+``bench-wavs/batch1.wav`` through the streaming path, with the leak cause
+instrumented per frame:
+
+========  =========  ==========  ==================================
+delay     locked?    echo        why anything leaked
+                     dropped
+========  =========  ==========  ==================================
+0-200 ms  yes        97.1%       lock acquisition only
+800 ms    yes        96.6%       lock acquisition only
+1200 ms   yes        96.2%       lock acquisition only
+1800 ms   yes        96.3%       lock acquisition only
+1900 ms   yes        76.0%       transition band -- mixed
+>=2000 ms **never**  **0.0%**    no lock: passes everything
+========  =========  ==========  ==================================
+
+The cliff sits at 2.0 s because that *is* ``_REF_MAX_SECONDS``: once the
+echo lags by more than the buffer depth, the audio it matches has already
+been trimmed, so the wide scan cannot find a qualifying peak, no lock is ever
+acquired, and the gate passes everything. Past the ceiling it fails open
+cleanly rather than misbehaving -- the safe direction, and the reason this is
+documented rather than defended against.
+
+Note the mechanism, because the plausible-sounding one is wrong:
+``_window_for`` returning ``None`` (the predicted window having slid out of
+the retained buffer) is **not** what degrades this. It was instrumented and
+fires **zero** times at every delay through 1800 ms, and only 3 times in the
+1900 ms transition band. The operative mechanism above the ceiling is failure
+to *acquire*, not failure to *score*.
+
+The residual ~2.9% leak at every delay inside the range is **exactly the
+``_LOCK_CONSECUTIVE`` frames** spent acquiring the lock at the start of a
+turn -- instrumentation shows zero frames leaking because rho fell below the
+threshold. It is invariant, not threshold-sensitive: lowering
+``VOICE_ECHO_GATE_THRESHOLD`` will not recover those frames, and only a
+smaller ``_LOCK_CONSECUTIVE`` would, at the cost of the false-lock margin
+that consecutive agreement buys (see the lock table above).
+
+The lag anchor is kept in **absolute stream coordinates** (total ref samples
+appended minus total mic samples fed), not as an offset from the end of the
+ring buffer. The send loop writes TTS in ~100 ms bursts while mic frames
+arrive every 32 ms, so a buffer-end-relative offset would jitter by up to a
+full send chunk (~1600 samples) -- far wider than the +/-400 search window,
+which would break the lock. Absolute counters are immune to burstiness.
+
+Cost: the locked path correlates a 512-sample chunk against a 1,312-sample
+slice (801 candidate lags) instead of the full 32,000-sample buffer (31,489
+lags) -- measured 0.043 ms versus 1.88 ms, a 44x saving. The wide scan now
+runs only while acquiring a lock, so the steady-state gate is far cheaper
+than the original as well as correct.
 
 Silence during playback is treated as echo-tail (dropped), not user speech --
 see the comment at the check itself for the reasoning. It's a deliberate
@@ -112,12 +295,17 @@ Design (mirrors ``wakeword_gate.py``; read that module first):
   threshold can be tuned against a real microphone later.
 * **Cross-thread safe.** :meth:`note_playback` runs on the send-loop thread;
   :meth:`feed` runs on the audio-loop thread (receive path). Both touch
-  ``_ref_buffer``/``_last_playback_ts`` and take ``_lock`` around that
-  access, but ``feed()`` only holds the lock long enough to snapshot the
-  buffer -- the (comparatively expensive) correlation itself runs unlocked
-  so it never blocks the send loop. ``_fail_open`` is written only from
-  :meth:`feed`'s own thread (a single reader/writer, per the above), so
-  reading it in :meth:`feed` and :meth:`state` is lock-free by construction.
+  ``_ref_buffer``/``_last_playback_ts``/``_ref_total`` and take ``_lock``
+  around that access, but ``feed()`` only holds the lock long enough to
+  snapshot the buffer -- the correlation itself runs unlocked so it never
+  blocks the send loop. The mic-side coordinate ``_mic_total`` is advanced
+  inside that same critical section, so the ``(ref_total, mic_total)`` pair
+  the lag lock is anchored in is always mutually consistent. The rest of the
+  lag state (``_locked_lag``, ``_cand_*``, ``_weak_hits``) is touched only by
+  :meth:`feed`'s own thread, except that :meth:`reset` clears it -- which it
+  does under ``_lock``. ``_fail_open`` is written only from :meth:`feed`'s
+  own thread (a single reader/writer, per the above), so reading it in
+  :meth:`feed` and :meth:`state` is lock-free by construction.
 """
 
 from __future__ import annotations
@@ -133,9 +321,27 @@ logger = logging.getLogger(__name__)
 _TRUTHY = {"1", "true", "yes", "on"}
 
 _SAMPLE_RATE = 16000
-# Ring buffer cap == delay search window; see module docstring "Delay window".
+# Buffer DEPTH only -- how much played audio we retain, kept generous so the
+# true echo (typically 100-200ms behind) is always still here. This is NOT
+# the delay search width; see _LAG_SEARCH_SAMPLES and the module docstring
+# section "Delay search: lock, don't scan".
 _REF_MAX_SECONDS = 2.0
 _REF_MAX_SAMPLES = int(_REF_MAX_SECONDS * _SAMPLE_RATE)
+# Delay search WIDTH: how many alignments we score once locked (+/-25ms at
+# 16kHz). Low hundreds of candidate lags is what keeps unrelated speech from
+# scoring high by coincidence -- the whole point of the redesign.
+_LAG_SEARCH_SAMPLES = 400
+# Lock acquisition: this many consecutive chunks whose wide-scan peak clears
+# _LOCK_PEAK_FLOOR and whose argmax lags agree within _LAG_SEARCH_SAMPLES.
+# Real echo agrees 100% of the time; unrelated speech 35.5% (measured), so
+# consecutive agreement is the discriminator.
+_LOCK_PEAK_FLOOR = 0.98
+_LOCK_CONSECUTIVE = 4
+# Lock release: an in-window peak this low, this many times running, means
+# the locked lag has stopped meaning anything (e.g. the client paused mic
+# frames, breaking the stream-coordinate anchor). Re-acquire from scratch.
+_UNLOCK_FLOOR = 0.2
+_UNLOCK_CONSECUTIVE = 8
 # If nothing has played in this long, treat the reference as expired rather
 # than correlate against stale audio from a much earlier turn.
 _REF_STALE_S = 1.5
@@ -154,12 +360,26 @@ class EchoGate:
 
     def __init__(self) -> None:
         self.enabled = os.environ.get("VOICE_ECHO_GATE", "").strip().lower() in _TRUTHY
-        self.threshold = float(os.environ.get("VOICE_ECHO_GATE_THRESHOLD", "0.7"))
+        self.threshold = float(os.environ.get("VOICE_ECHO_GATE_THRESHOLD", "0.85"))
         self._ref_buffer = bytearray()
         self._last_playback_ts = 0.0
         self._fail_open = False
-        # Guards _ref_buffer/_last_playback_ts across note_playback() (send-loop
-        # thread) vs feed() (audio-loop thread). See module docstring.
+        # Total samples ever appended to the reference. Monotonic, never
+        # trimmed with the ring buffer -- it is the absolute stream coordinate
+        # the lag lock is anchored in (see module docstring).
+        self._ref_total = 0
+        # Total mic samples ever fed. The other half of that coordinate.
+        self._mic_total = 0
+        # Lag lock state, all in absolute stream coordinates.
+        self._locked_lag: int | None = None
+        self._cand_lag: int | None = None
+        self._cand_hits = 0
+        self._weak_hits = 0
+        # Guards _ref_buffer/_last_playback_ts/_ref_total across
+        # note_playback() (send-loop thread) vs feed() (audio-loop thread).
+        # The lag state (_locked_lag/_cand_*/_weak_hits/_mic_total) is touched
+        # only by feed()'s own thread, but reset() can run from elsewhere, so
+        # it is cleared under the same lock. See module docstring.
         self._lock = threading.Lock()
 
     def state(self) -> str:
@@ -183,6 +403,7 @@ class EchoGate:
             return
         with self._lock:
             self._ref_buffer.extend(pcm)
+            self._ref_total += len(pcm) // 2  # int16 mono
             self._last_playback_ts = time.monotonic()
             cap_bytes = _REF_MAX_SAMPLES * 2  # int16 mono
             if len(self._ref_buffer) > cap_bytes:
@@ -202,17 +423,26 @@ class EchoGate:
             return True
 
     def _score(self, pcm: bytes) -> bool:
-        with self._lock:
-            ref_snapshot = bytes(self._ref_buffer)
-            last_ts = self._last_playback_ts
-
-        if not ref_snapshot or (time.monotonic() - last_ts) > _REF_STALE_S:
-            return True  # nothing recently played -- nothing to gate against
-
         import numpy as np  # lazy: see module docstring
 
         mic = np.frombuffer(pcm, dtype=np.int16)
         if mic.size == 0:
+            return True
+
+        with self._lock:
+            ref_snapshot = bytes(self._ref_buffer)
+            last_ts = self._last_playback_ts
+            ref_total = self._ref_total
+            # Mic samples are contiguous real time: advance the absolute
+            # coordinate for EVERY chunk we are handed, including silent ones
+            # and ones we return early on, or the lag anchor drifts.
+            mic_start = self._mic_total
+            self._mic_total += mic.size
+
+        if not ref_snapshot or (time.monotonic() - last_ts) > _REF_STALE_S:
+            # Nothing recently played -- nothing to gate against. The delay
+            # estimate belongs to that finished playback, so drop it too.
+            self._unlock()
             return True
 
         mic_rms = float(np.sqrt(np.mean(mic.astype(np.float64) ** 2)))
@@ -220,50 +450,130 @@ class EchoGate:
             # Silence while TTS is (recently) playing carries nothing worth
             # passing to ASR either way -- treat it as an echo-tail/inter-word
             # gap rather than user speech. This is a deliberate policy choice
-            # (either answer is "safe" here), not a result of the correlation
-            # math below.
+            # (either answer is "safe" here), independent of the correlation
+            # math below, so it applies in every lock state.
             return False
 
         ref = np.frombuffer(ref_snapshot, dtype=np.int16)
-        rho = self._best_correlation(mic, ref)
+        # Absolute stream index of ref[0], the oldest retained sample.
+        ref_base = ref_total - ref.size
+
+        if self._locked_lag is None:
+            self._observe_for_lock(mic, ref, ref_base, mic_start)
+            # Uncalibrated: never drop. See "Delay search: lock, don't scan".
+            return True
+
+        lo, hi = self._window_for(self._locked_lag, mic, ref, ref_base, mic_start)
+        if lo is None:
+            # The locked lag points outside what the buffer still holds.
+            self._note_weak()
+            return True
+
+        rho, idx = self._best_correlation(mic, ref, lo, hi)
+        # idx is already an absolute offset into `ref` (not relative to lo).
+        lag = mic_start - (ref_base + idx)
+        if rho < _UNLOCK_FLOOR:
+            self._note_weak()
+        else:
+            self._weak_hits = 0
+            self._locked_lag = lag  # slew to track slow drift
+
         if rho >= self.threshold:
-            logger.debug("echo gate: rho=%.3f (dropped)", rho)
+            logger.debug("echo gate: rho=%.3f lag=%d (dropped)", rho, lag)
             return False
         if rho >= _NEAR_MISS_FLOOR:
             logger.info("echo gate near miss: rho=%.3f (passed, below threshold %.2f)", rho, self.threshold)
         return True
 
+    def _observe_for_lock(self, mic: Any, ref: Any, ref_base: int, mic_start: int) -> None:
+        """Wide-scan one chunk purely to gather delay evidence. Never decides
+        pass/drop -- the caller passes the audio regardless."""
+        rho, idx = self._best_correlation(mic, ref)
+        if rho < _LOCK_PEAK_FLOOR:
+            # Weak evidence breaks the run: lock evidence must be consecutive.
+            self._cand_lag = None
+            self._cand_hits = 0
+            return
+        lag = mic_start - (ref_base + idx)
+        if self._cand_lag is not None and abs(lag - self._cand_lag) <= _LAG_SEARCH_SAMPLES:
+            self._cand_hits += 1
+        else:
+            self._cand_hits = 1
+        self._cand_lag = lag
+        if self._cand_hits >= _LOCK_CONSECUTIVE:
+            self._locked_lag = lag
+            self._cand_lag = None
+            self._cand_hits = 0
+            self._weak_hits = 0
+            logger.info("echo gate: locked echo delay at %d samples (%.0f ms)", lag, lag * 1000.0 / _SAMPLE_RATE)
+
     @staticmethod
-    def _best_correlation(mic: Any, ref: Any) -> float:
-        """Best normalized cross-correlation of `mic` against every
-        same-length window of `ref`, i.e. every possible delay at once.
-        Returns a value in [0, 1] where 1.0 means some window of `ref`
-        matches `mic`'s shape exactly (up to scale) and 0.0 means no
-        alignment resembles it at all. Isolated as its own static method so
-        it can be monkeypatched to fail deliberately in tests, and so the
-        (only mildly expensive) numeric work is easy to spot separately from
-        the bookkeeping in :meth:`_score`."""
+    def _window_for(lag: int, mic: Any, ref: Any, ref_base: int, mic_start: int) -> tuple[Any, Any]:
+        """Index range into `ref` covering +/-_LAG_SEARCH_SAMPLES around the
+        window that `lag` predicts. Returns (None, None) if that range has
+        already slid out of the retained buffer."""
+        centre = (mic_start - lag) - ref_base
+        lo = max(0, centre - _LAG_SEARCH_SAMPLES)
+        hi = min(ref.size - mic.size, centre + _LAG_SEARCH_SAMPLES)
+        if hi < lo:
+            return None, None
+        return lo, hi
+
+    def _note_weak(self) -> None:
+        self._weak_hits += 1
+        if self._weak_hits >= _UNLOCK_CONSECUTIVE:
+            logger.info("echo gate: releasing stale delay lock after %d weak chunks", self._weak_hits)
+            self._unlock()
+
+    def _unlock(self) -> None:
+        self._locked_lag = None
+        self._cand_lag = None
+        self._cand_hits = 0
+        self._weak_hits = 0
+
+    @staticmethod
+    def _best_correlation(mic: Any, ref: Any, lo: int = 0, hi: int | None = None) -> tuple[float, int]:
+        """Best normalized cross-correlation of `mic` against the same-length
+        windows of `ref` starting at offsets ``lo..hi`` inclusive. Returns
+        ``(rho, idx)``: rho in [0, 1], where 1.0 means that window matches
+        `mic`'s shape exactly (up to scale), and idx the offset into `ref`
+        where it was found.
+
+        ``lo``/``hi`` default to the full buffer -- the *wide scan*, which is
+        now used only to acquire a lock, never to decide pass/drop. See the
+        module docstring: maximizing over the full buffer is precisely the
+        defect this redesign fixes, so callers deciding a verdict must pass a
+        narrow range.
+
+        Isolated as its own static method so it can be monkeypatched to fail
+        deliberately in tests, and so the numeric work is easy to spot
+        separately from the bookkeeping in :meth:`_score`."""
         import numpy as np  # lazy: see module docstring
 
         frame_len = mic.size
         if ref.size < frame_len:
-            return 0.0
+            return 0.0, 0
 
+        last = ref.size - frame_len
+        lo = max(0, min(lo, last))
+        hi = last if hi is None else max(lo, min(hi, last))
+
+        # Slice to the search range first, so a locked (narrow) scan costs
+        # O(range * frame_len) rather than the full buffer.
+        seg = ref[lo : hi + frame_len].astype(np.float64)
         mic_f = mic.astype(np.float64)
-        ref_f = ref.astype(np.float64)
-        # Dot product of `mic` against every same-length window of `ref` --
-        # one vectorized call covers the whole delay search window (see
-        # module docstring "Delay window"), no per-lag Python loop needed.
-        raw = np.correlate(ref_f, mic_f, mode="valid")
-        # Energy of each of those same-length ref windows, via a cumulative
-        # sum (O(n)) rather than recomputing a sum over `frame_len` samples
-        # per window.
-        csum = np.concatenate(([0.0], np.cumsum(ref_f * ref_f)))
+        # Dot product of `mic` against every same-length window of `seg`, in
+        # one vectorized call -- no per-lag Python loop needed.
+        raw = np.correlate(seg, mic_f, mode="valid")
+        # Energy of each of those windows, via a cumulative sum (O(n)) rather
+        # than recomputing a sum over `frame_len` samples per window.
+        csum = np.concatenate(([0.0], np.cumsum(seg * seg)))
         ref_energy = csum[frame_len:] - csum[:-frame_len]
         mic_energy = float(np.dot(mic_f, mic_f))
         denom = np.sqrt(ref_energy * mic_energy) + 1e-9
         rho = np.abs(raw) / denom
-        return float(np.max(rho))
+        best = int(np.argmax(rho))
+        return float(rho[best]), lo + best
 
     def reset(self) -> None:
         """Re-arm for a new session: drop the playback reference. Unlike
@@ -275,3 +585,6 @@ class EchoGate:
         with self._lock:
             self._ref_buffer.clear()
             self._last_playback_ts = 0.0
+            # The delay lock describes the previous session's audio path;
+            # a new session re-acquires it from scratch.
+            self._unlock()
