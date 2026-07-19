@@ -618,3 +618,214 @@ class TestRealAudio:
             assert pass_rate <= 0.05, f"quiet barge-in leaked through at {pass_rate:.0%}"
         else:
             assert pass_rate >= min_pass_rate, f"barge-in at {user_ratio}x only passed {pass_rate:.0%}"
+
+
+# ── (10) observe mode ────────────────────────────────────────────────────
+#
+# Observe scores exactly as ON does and logs the result, but never drops.
+# Its whole reason to exist is producing calibration data from a real
+# acoustic path, so the tests below pin two things: that it cannot affect
+# audio, and that the log line carries the fields an offline calibration
+# needs. Assertions are on the captured record's fields, never on prose.
+
+
+def _calib_records(caplog):
+    return [r for r in caplog.records if r.name == "echo_gate.calib"]
+
+
+def _calib_fields(record) -> dict:
+    msg = record.getMessage()
+    assert msg.startswith("echo_gate_calib "), msg
+    return dict(kv.split("=", 1) for kv in msg.split()[1:])
+
+
+def test_observe_is_its_own_mode(monkeypatch):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    gate = eg.EchoGate()
+    assert gate.mode == "observe"
+    # `enabled` stays the "this gate is doing work" bool it always was --
+    # observe does record the reference and does score.
+    assert gate.enabled is True
+
+
+@pytest.mark.parametrize("flag", ["1", "true", "yes", "on"])
+def test_truthy_flags_still_mean_on(monkeypatch, flag):
+    monkeypatch.setenv("VOICE_ECHO_GATE", flag)
+    gate = eg.EchoGate()
+    assert gate.mode == "on"
+    assert gate.enabled is True
+
+
+def test_off_is_fully_inert_no_reference_no_logging(monkeypatch, caplog):
+    """OFF must stay byte-identical to before this feature: no reference
+    recorded, no scoring, no calibration lines, not even at DEBUG."""
+    monkeypatch.delenv("VOICE_ECHO_GATE", raising=False)
+    gate = eg.EchoGate()
+    assert gate.mode == "off"
+    caplog.set_level(0)
+    tts = _noise_pcm(SEND * 4, seed=11)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    assert gate._ref_buffer == bytearray()
+    assert gate._ref_total == 0
+    for k in range(8):
+        assert gate.feed(_echo_frame(tts, 0, k)) is True
+    assert gate._mic_total == 0  # feed() short-circuited before any scoring
+    assert _calib_records(caplog) == []
+
+
+def test_observe_never_drops_what_on_would_drop(monkeypatch):
+    """Same audio, same lock, both modes: ON drops, observe passes."""
+    tts = _noise_pcm(SEND * 8, seed=12)
+
+    monkeypatch.setenv("VOICE_ECHO_GATE", "1")
+    on = eg.EchoGate()
+    for chunk in _chunks(tts, SEND):
+        on.note_playback(chunk)
+    k = _lock_on_echo(on, tts)
+    on_verdicts = [on.feed(_echo_frame(tts, 0, i)) for i in range(k, k + 10)]
+    assert not any(on_verdicts), "ON should drop a pure echo -- test premise broken"
+
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    obs = eg.EchoGate()
+    for chunk in _chunks(tts, SEND):
+        obs.note_playback(chunk)
+    k = _lock_on_echo(obs, tts)
+    assert all(obs.feed(_echo_frame(tts, 0, i)) for i in range(k, k + 10))
+
+
+def test_observe_never_drops_silence(monkeypatch):
+    """The silence policy drops sub-floor chunks in every lock state. Observe
+    still passes them -- observe never drops, no exceptions."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 4, seed=13)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    assert gate.feed(_silence_pcm(FRAME)) is True
+
+
+def test_observe_records_the_reference_and_acquires_the_lock(monkeypatch):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 8, seed=14)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    assert len(gate._ref_buffer) > 0
+    assert gate._ref_total == len(tts) // 2
+    _lock_on_echo(gate, tts)  # asserts _locked_lag is not None
+
+
+def test_observe_state_says_observing_not_gating(monkeypatch):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    gate = eg.EchoGate()
+    assert gate.state() == "idle"
+    gate.note_playback(_noise_pcm(SEND, seed=15))
+    assert gate.state() == "observing"
+
+
+def test_calibration_line_has_the_fields_a_calibration_needs(monkeypatch, caplog):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    caplog.set_level("INFO")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 8, seed=16)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    k = _lock_on_echo(gate, tts)
+    gate.feed(_echo_frame(tts, 0, k))
+
+    scored = [f for f in map(_calib_fields, _calib_records(caplog)) if f["reason"] == "scored"]
+    assert scored, "a locked, scored chunk produced no calibration line"
+    f = scored[-1]
+    assert set(f) == {
+        "t", "mic", "rms", "refage_ms", "rho", "lock", "lag", "lag_ms", "verdict", "thr", "reason",
+    }
+    assert f["lock"] == "locked"
+    assert float(f["rho"]) > 0.99          # pure echo
+    assert f["verdict"] == "drop"          # what ON would have done
+    assert float(f["thr"]) == gate.threshold
+    assert int(f["lag"]) == 0
+    assert float(f["lag_ms"]) == 0.0
+    assert float(f["rms"]) > eg._SILENCE_RMS_FLOOR
+    assert float(f["refage_ms"]) >= 0.0
+    assert int(f["mic"]) == k * FRAME      # absolute, so chunks are orderable
+    assert float(f["t"]) > 0
+
+
+def test_calibration_verdict_tracks_the_threshold(monkeypatch, caplog):
+    """`verdict` is what ON would return at the *current* threshold, so a
+    threshold sweep can be replayed offline against the logged rho."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    monkeypatch.setenv("VOICE_ECHO_GATE_THRESHOLD", "1.5")  # unreachable
+    caplog.set_level("INFO")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 8, seed=17)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    k = _lock_on_echo(gate, tts)
+    gate.feed(_echo_frame(tts, 0, k))
+    scored = [f for f in map(_calib_fields, _calib_records(caplog)) if f["reason"] == "scored"]
+    assert scored[-1]["verdict"] == "pass"
+
+
+def test_silence_is_visible_in_the_log_as_a_drop(monkeypatch, caplog):
+    """A calibration run needs to know how much of the stream was silence, and
+    that ON would have dropped it -- even though observe passed it."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    caplog.set_level("INFO")
+    gate = eg.EchoGate()
+    for chunk in _chunks(_noise_pcm(SEND * 4, seed=18), SEND):
+        gate.note_playback(chunk)
+    assert gate.feed(_silence_pcm(FRAME)) is True
+    silent = [f for f in map(_calib_fields, _calib_records(caplog)) if f["reason"] == "silence"]
+    assert len(silent) == 1
+    assert silent[0]["verdict"] == "drop"
+    assert float(silent[0]["rms"]) < eg._SILENCE_RMS_FLOOR
+
+
+def test_lock_acquisition_chunks_are_logged_and_marked(monkeypatch, caplog):
+    """The wide-scan rho spent acquiring a lock is a different quantity from
+    the locked rho (~31k candidate lags vs 801). It is logged -- acquisition
+    is itself a calibration question -- but tagged so it can be separated."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    caplog.set_level("INFO")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 8, seed=19)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    _lock_on_echo(gate, tts)
+    acquiring = [f for f in map(_calib_fields, _calib_records(caplog)) if f["reason"] == "acquiring"]
+    assert len(acquiring) == eg._LOCK_CONSECUTIVE
+    assert all(f["verdict"] == "pass" for f in acquiring)  # unlocked never drops
+    assert acquiring[0]["lock"] == "locking"
+    assert acquiring[-1]["lock"] == "locked"
+
+
+def test_idle_chunks_are_decimated_not_dropped(monkeypatch, caplog):
+    """With no playback reference there is no rho to record, so idle chunks
+    are sampled 1-in-N purely to stay countable. N is the knob."""
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    monkeypatch.setenv("VOICE_ECHO_GATE_LOG_EVERY", "4")
+    caplog.set_level("INFO")
+    gate = eg.EchoGate()
+    assert gate._log_every == 4
+    for _ in range(20):
+        assert gate.feed(_noise_pcm(FRAME, seed=20)) is True
+    idle = [f for f in map(_calib_fields, _calib_records(caplog)) if f["reason"] == "no_ref"]
+    assert len(idle) == 5
+    assert all(f["lock"] == "unlocked" for f in idle)
+    assert all(f["verdict"] == "pass" for f in idle)
+
+
+def test_observe_still_fails_open_on_scoring_exception(monkeypatch, caplog):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    gate = eg.EchoGate()
+    for chunk in _chunks(_noise_pcm(SEND * 2, seed=21), SEND):
+        gate.note_playback(chunk)
+
+    def boom(mic, ref, lo=0, hi=None):
+        raise RuntimeError("scorer exploded")
+
+    monkeypatch.setattr(eg.EchoGate, "_best_correlation", staticmethod(boom))
+    assert gate.feed(_noise_pcm(FRAME, seed=22)) is True
+    assert gate._fail_open is True

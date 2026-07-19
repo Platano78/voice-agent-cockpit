@@ -274,11 +274,59 @@ Silence during playback is treated as echo-tail (dropped), not user speech --
 see the comment at the check itself for the reasoning. It's a deliberate
 choice, not something the correlation math decides.
 
+Observe mode: calibrate against a real room, not a transform
+------------------------------------------------------------
+Every number in the tables above comes from *synthetic* transforms of one
+real WAV pair: a scaled, delayed, optionally filtered copy of the playback
+signal standing in for the echo. Nothing here has been through air. The true
+acoustic path -- phone speaker, room, phone mic, the client's own AEC and
+AGC -- is exactly the thing most likely to move true-echo rho off the ~1.0
+the tables assume, and it is unmeasurable from a transform.
+
+Calibrating it needs the gate scoring live audio, which OFF/ON alone can't
+give you: the only way to learn the real rho distribution with ON is to
+enable dropping and discover the hard way whether it eats the user's speech.
+
+``VOICE_ECHO_GATE=observe`` is the third state. It records the reference,
+runs the *entire* scoring path -- lock acquisition, slew, unlock, silence
+policy -- and logs what it found, but :meth:`feed` returns True
+unconditionally. The user just uses the assistant normally for a day and the
+log holds the real distribution across many turns, distances, and background
+conditions. Threshold-setting then reads off data instead of a guess.
+
+The gate cannot label the categories that matter (true echo vs barge-in vs
+silence vs user-only) -- that needs to know whether a human was talking,
+which is precisely what it is trying to infer. So the log line instead
+carries enough state to reconstruct them offline: ``refage_ms`` says whether
+the assistant was speaking, ``rms`` says whether anything was arriving, and
+``mic`` (absolute sample index) makes chunks orderable and contiguous, so a
+turn can be sliced out and its frames histogrammed together. Lines are
+``key=value`` after a fixed ``echo_gate_calib`` prefix, on a dedicated
+``echo_gate.calib`` logger, so a busy log greps clean.
+
+**Volume.** A line per 512-sample chunk is ~31/s. Lines are emitted at full
+rate only while a playback reference is fresh -- the window that carries all
+the echo information, and bounded by how long the assistant actually
+speaks. When nothing has played (no reference at all, so no rho exists to
+record), lines are decimated by ``VOICE_ECHO_GATE_LOG_EVERY`` (default 32,
+about one per second) purely so the idle stretches remain *countable*. The
+cost is that idle-chunk counts are approximate to within that factor; no
+part of the rho distribution is lost, because chunks with no reference have
+no rho. Silence *during* playback is logged at full rate -- a calibration
+run needs to know what fraction of a turn was silence, and the silence
+policy drops those chunks in ON mode, so they are decisions, not idling.
+
+Level is INFO, matching the near-miss logging already here: the data has to
+survive at the live log level to be collected at all, and a dedicated logger
+name means it can be silenced or routed to its own file without touching
+anything else.
+
 Design (mirrors ``wakeword_gate.py``; read that module first):
 
 * **Env-flag gated, default OFF.** Controlled by ``VOICE_ECHO_GATE``; unset
   or falsy leaves ``feed()`` passing everything through, so a plain restart
   with no env changes is byte-identical to today's behaviour.
+* **Three states, not two** -- see "Observe mode" below.
 * **Fail open, permanently.** Any exception anywhere in scoring is logged
   once and the gate passes all audio, unconditionally, for the rest of the
   process -- a broken gate must never brick the assistant, and a half-broken
@@ -317,8 +365,13 @@ import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+# Calibration lines get their own logger and their own fixed line prefix so
+# they can be grepped, silenced, or routed to a file independently of the
+# gate's ordinary chatter. See "Observe mode" in the module docstring.
+calib_logger = logging.getLogger("echo_gate.calib")
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_OBSERVE = "observe"
 
 _SAMPLE_RATE = 16000
 # Buffer DEPTH only -- how much played audio we retain, kept generous so the
@@ -359,8 +412,17 @@ class EchoGate:
     layered on top of an echo (still pass)."""
 
     def __init__(self) -> None:
-        self.enabled = os.environ.get("VOICE_ECHO_GATE", "").strip().lower() in _TRUTHY
+        flag = os.environ.get("VOICE_ECHO_GATE", "").strip().lower()
+        # "off" | "on" | "observe". `enabled` is kept as the derived bool it
+        # has always been -- "this gate is doing work" -- because observe does
+        # record the reference and does score, it just never drops. Anything
+        # reading `.enabled` to decide whether the gate is inert stays correct.
+        self.mode = _OBSERVE if flag == _OBSERVE else ("on" if flag in _TRUTHY else "off")
+        self.enabled = self.mode != "off"
         self.threshold = float(os.environ.get("VOICE_ECHO_GATE_THRESHOLD", "0.85"))
+        # Decimation for calibration lines logged while nothing is playing.
+        self._log_every = max(1, int(os.environ.get("VOICE_ECHO_GATE_LOG_EVERY", "32")))
+        self._idle_chunks = 0
         self._ref_buffer = bytearray()
         self._last_playback_ts = 0.0
         self._fail_open = False
@@ -385,14 +447,21 @@ class EchoGate:
     def state(self) -> str:
         """Coarse status for the settings panel: ``"off"`` (not enabled),
         ``"gating"`` (a fresh playback reference exists -- mic audio is
-        actively being compared against it), or ``"idle"`` (enabled, but
-        nothing recent to gate against, so everything passes through)."""
+        actively being compared against it), ``"observing"`` (same, but in
+        observe mode, so nothing will be dropped), or ``"idle"`` (enabled, but
+        nothing recent to gate against, so everything passes through).
+
+        Observe deliberately gets its own word rather than reusing
+        ``"gating"``: a panel that said "gating" while the gate cannot drop
+        anything would be lying about the one thing an operator checks it
+        for. It shares ``"idle"`` with ON, because with no reference the two
+        modes genuinely do the same thing -- pass everything."""
         if not self.enabled:
             return "off"
         with self._lock:
             last_ts = self._last_playback_ts
         if last_ts and (time.monotonic() - last_ts) <= _REF_STALE_S:
-            return "gating"
+            return "observing" if self.mode == _OBSERVE else "gating"
         return "idle"
 
     def note_playback(self, pcm: bytes) -> None:
@@ -412,11 +481,15 @@ class EchoGate:
     def feed(self, pcm: bytes) -> bool:
         """Feed one chunk of incoming mic PCM. Returns True to pass it on to
         VAD/ASR, False to drop it as echo. Never raises -- any scoring
-        failure fails open (returns True) for the rest of the session."""
+        failure fails open (returns True) for the rest of the session.
+
+        In observe mode the full scoring path still runs (and logs), but the
+        verdict is discarded and everything passes."""
         if not self.enabled or self._fail_open:
             return True
         try:
-            return self._score(pcm)
+            passed = self._score(pcm)
+            return True if self.mode == _OBSERVE else passed
         except Exception:
             logger.exception("echo gate scoring failed; failing open (passing all audio) for the rest of the session")
             self._fail_open = True
@@ -443,6 +516,12 @@ class EchoGate:
             # Nothing recently played -- nothing to gate against. The delay
             # estimate belongs to that finished playback, so drop it too.
             self._unlock()
+            if self.mode == _OBSERVE:
+                # Decimated: no reference means no rho to record, so only the
+                # chunk count is at stake. See "Volume" in the docstring.
+                self._idle_chunks += 1
+                if self._idle_chunks % self._log_every == 0:
+                    self._calib(mic_start, self._rms(mic), last_ts, float("nan"), None, True, "no_ref")
             return True
 
         mic_rms = float(np.sqrt(np.mean(mic.astype(np.float64) ** 2)))
@@ -452,6 +531,13 @@ class EchoGate:
             # gap rather than user speech. This is a deliberate policy choice
             # (either answer is "safe" here), independent of the correlation
             # math below, so it applies in every lock state.
+            #
+            # Logged at full rate, unlike the no-reference case above: this is
+            # a real drop decision, and a calibration run needs to know what
+            # fraction of a turn it accounts for. `feed` still passes it in
+            # observe -- observe never drops, silence policy included.
+            if self.mode == _OBSERVE:
+                self._calib(mic_start, mic_rms, last_ts, float("nan"), None, False, "silence")
             return False
 
         ref = np.frombuffer(ref_snapshot, dtype=np.int16)
@@ -459,14 +545,18 @@ class EchoGate:
         ref_base = ref_total - ref.size
 
         if self._locked_lag is None:
-            self._observe_for_lock(mic, ref, ref_base, mic_start)
+            rho, lag = self._observe_for_lock(mic, ref, ref_base, mic_start)
             # Uncalibrated: never drop. See "Delay search: lock, don't scan".
+            if self.mode == _OBSERVE:
+                self._calib(mic_start, mic_rms, last_ts, rho, lag, True, "acquiring")
             return True
 
         lo, hi = self._window_for(self._locked_lag, mic, ref, ref_base, mic_start)
         if lo is None:
             # The locked lag points outside what the buffer still holds.
             self._note_weak()
+            if self.mode == _OBSERVE:
+                self._calib(mic_start, mic_rms, last_ts, float("nan"), self._locked_lag, True, "no_window")
             return True
 
         rho, idx = self._best_correlation(mic, ref, lo, hi)
@@ -478,6 +568,8 @@ class EchoGate:
             self._weak_hits = 0
             self._locked_lag = lag  # slew to track slow drift
 
+        if self.mode == _OBSERVE:
+            self._calib(mic_start, mic_rms, last_ts, rho, lag, rho < self.threshold, "scored")
         if rho >= self.threshold:
             logger.debug("echo gate: rho=%.3f lag=%d (dropped)", rho, lag)
             return False
@@ -485,15 +577,22 @@ class EchoGate:
             logger.info("echo gate near miss: rho=%.3f (passed, below threshold %.2f)", rho, self.threshold)
         return True
 
-    def _observe_for_lock(self, mic: Any, ref: Any, ref_base: int, mic_start: int) -> None:
+    def _observe_for_lock(self, mic: Any, ref: Any, ref_base: int, mic_start: int) -> tuple[float, int | None]:
         """Wide-scan one chunk purely to gather delay evidence. Never decides
-        pass/drop -- the caller passes the audio regardless."""
+        pass/drop -- the caller passes the audio regardless.
+
+        Returns the wide-scan ``(rho, lag)`` for observe-mode logging; the
+        return value is ignored in every other mode, so this is reporting
+        only. **That rho is not the locked rho**: it is a max over tens of
+        thousands of alignments rather than 801, which is exactly the
+        inflation "Delay search: lock, don't scan" is about. Calibration must
+        histogram it separately -- ``reason=acquiring`` marks it."""
         rho, idx = self._best_correlation(mic, ref)
         if rho < _LOCK_PEAK_FLOOR:
             # Weak evidence breaks the run: lock evidence must be consecutive.
             self._cand_lag = None
             self._cand_hits = 0
-            return
+            return rho, None
         lag = mic_start - (ref_base + idx)
         if self._cand_lag is not None and abs(lag - self._cand_lag) <= _LAG_SEARCH_SAMPLES:
             self._cand_hits += 1
@@ -506,6 +605,51 @@ class EchoGate:
             self._cand_hits = 0
             self._weak_hits = 0
             logger.info("echo gate: locked echo delay at %d samples (%.0f ms)", lag, lag * 1000.0 / _SAMPLE_RATE)
+        return rho, lag
+
+    @staticmethod
+    def _rms(mic: Any) -> float:
+        import numpy as np  # lazy: see module docstring
+
+        return float(np.sqrt(np.mean(mic.astype(np.float64) ** 2)))
+
+    def _lock_state(self) -> str:
+        if self._locked_lag is not None:
+            return "locked"
+        return "locking" if self._cand_hits else "unlocked"
+
+    def _calib(
+        self,
+        mic_start: int,
+        rms: float,
+        last_ts: float,
+        rho: float,
+        lag: int | None,
+        would_pass: bool,
+        reason: str,
+    ) -> None:
+        """Emit one machine-parseable calibration record. Observe mode only --
+        ON is deliberately left byte-identical by this slice.
+
+        ``key=value`` after a fixed prefix, on the ``echo_gate.calib`` logger.
+        ``verdict`` is what ON *would* have returned for this chunk at the
+        current threshold, which is the whole point: it lets a threshold sweep
+        be replayed offline against rho without re-deriving the policy."""
+        age_ms = (time.monotonic() - last_ts) * 1000.0 if last_ts else float("inf")
+        calib_logger.info(
+            "echo_gate_calib t=%.3f mic=%d rms=%.1f refage_ms=%.0f rho=%.4f lock=%s lag=%s lag_ms=%s verdict=%s thr=%.2f reason=%s",
+            time.time(),
+            mic_start,
+            rms,
+            age_ms,
+            rho,
+            self._lock_state(),
+            "nan" if lag is None else lag,
+            "nan" if lag is None else "%.1f" % (lag * 1000.0 / _SAMPLE_RATE),
+            "pass" if would_pass else "drop",
+            self.threshold,
+            reason,
+        )
 
     @staticmethod
     def _window_for(lag: int, mic: Any, ref: Any, ref_base: int, mic_start: int) -> tuple[Any, Any]:
