@@ -350,12 +350,21 @@ class BrainControl:
             logger.warning("BrainControl: audition failed for %s: %s", name, e)
 
     def _voice_delete(self, name: str) -> tuple[bool, str]:
+        # Logged on every path: a silent handler made it impossible to tell from the
+        # logs whether a user's delete had ever reached the server at all.
+        logger.info("BrainControl: voice delete requested for %s", name)
         if self.tts_handler is None:
+            logger.warning("BrainControl: voice delete refused for %s: voice switching unavailable", name)
             return False, "voice switching unavailable"
         ok, error = voice_clone.check_delete_allowed(name, self.tts_handler.voice, self._predefined_voices())
         if not ok:
+            logger.warning("BrainControl: voice delete refused for %s: %s", name, error)
             return False, error
         ok, error = voice_clone.delete_voice(name)
+        if ok:
+            logger.info("BrainControl: voice delete succeeded for %s", name)
+        else:
+            logger.warning("BrainControl: voice delete failed for %s: %s", name, error)
         if ok and self.streamer is not None:
             # Same broadcast as _voice_clone_end -- every client's
             # custom-voices dropdown needs to drop the deleted entry, not

@@ -880,6 +880,12 @@
     cursor: pointer;
   }
   .voiceCloneDeleteBtn:hover { background: color-mix(in srgb, var(--bad) 15%, var(--bg)); }
+  .voiceCloneDeleteBtn.voiceCloneDeleteBtnArmed {
+    background: var(--bad);
+    border-color: var(--bad);
+    color: #fff;
+    font-weight: 600;
+  }
   #voiceCloneName {
     width: 100%;
     min-height: 44px;
@@ -2175,6 +2181,11 @@ let voiceCloneBusy = false;      // true while an upload (file or recording) is 
 let pendingVoiceDeleteName = null; // set right before sending config_set{voice_delete}, so the
                                     // matching config_ack (ok or error) can be routed to this UI
                                     // rather than just the generic diagnostics log.
+let voiceDeleteArmedName = null;   // ruling 10: in-page two-step confirm. Browser confirm() is
+let voiceDeleteArmedBtn = null;    // unusable here — mobile Chrome/Safari let a user suppress
+let voiceDeleteArmTimer = null;    // further dialogs, after which it returns false forever and
+                                    // the Delete button is silently inert.
+const VOICE_DELETE_ARM_MS = 5000;  // armed row reverts to "Delete" after this idle window
 
 function setVoiceCloneStatus(text, isError) {
   els.voiceCloneStatus.textContent = text || "";
@@ -2213,8 +2224,35 @@ function renderVoiceDropdown(activeVoice) {
   });
 }
 
+// Disarm whatever row is mid-confirm. Safe to call when nothing is armed, and safe
+// after a re-render has thrown the button away (the node is simply detached).
+function disarmVoiceDelete() {
+  if (voiceDeleteArmTimer !== null) {
+    clearTimeout(voiceDeleteArmTimer);
+    voiceDeleteArmTimer = null;
+  }
+  if (voiceDeleteArmedBtn) {
+    voiceDeleteArmedBtn.textContent = "Delete";
+    voiceDeleteArmedBtn.setAttribute("aria-label", "Delete voice " + voiceDeleteArmedName);
+    voiceDeleteArmedBtn.classList.remove("voiceCloneDeleteBtnArmed");
+  }
+  voiceDeleteArmedName = null;
+  voiceDeleteArmedBtn = null;
+}
+
+function armVoiceDelete(name, btn) {
+  disarmVoiceDelete(); // only one row may be armed at a time
+  voiceDeleteArmedName = name;
+  voiceDeleteArmedBtn = btn;
+  btn.textContent = "Confirm?";
+  btn.setAttribute("aria-label", "Confirm deletion of voice " + name + " — activate again to delete");
+  btn.classList.add("voiceCloneDeleteBtnArmed");
+  voiceDeleteArmTimer = setTimeout(disarmVoiceDelete, VOICE_DELETE_ARM_MS);
+}
+
 // Ruling 10: delete affordance per custom voice.
 function renderCustomVoiceList() {
+  disarmVoiceDelete(); // the armed button is about to be discarded by the rebuild
   els.voiceCloneList.innerHTML = "";
   if (lastCustomVoices.length === 0) {
     const empty = document.createElement("div");
@@ -2234,8 +2272,19 @@ function renderCustomVoiceList() {
     del.textContent = "Delete";
     del.setAttribute("aria-label", "Delete voice " + name);
     del.addEventListener("click", () => {
-      if (!confirm(`Delete custom voice "${name}"? This can't be undone.`)) return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (voiceDeleteArmedName !== name) {
+        armVoiceDelete(name, del);
+        log(`voice delete armed: "${name}" (tap Confirm again)`);
+        setVoiceCloneStatus(`tap Confirm again to delete "${name}" — this can't be undone`);
+        return;
+      }
+      disarmVoiceDelete();
+      log(`voice delete confirmed: "${name}"`);
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setVoiceCloneStatus("not connected — reconnect, then delete again", true);
+        log(`voice delete not sent: socket closed ("${name}")`);
+        return;
+      }
       pendingVoiceDeleteName = name;
       ws.send(JSON.stringify({ type: "config_set", voice_delete: name }));
     });

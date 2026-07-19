@@ -12,6 +12,7 @@ actual deployed logic, not a mock of it.
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 
@@ -153,6 +154,34 @@ def test_voice_delete_none_streamer_is_safe(tmp_path, monkeypatch):
     ok, error = bc._voice_delete("my_voice")
 
     assert (ok, error) == (True, "")
+
+
+def test_voice_delete_logs_request_and_success(tmp_path, monkeypatch, caplog):
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+    (voices_dir / "my_voice.safetensors").write_bytes(b"fake state")
+    monkeypatch.setenv("VOICE_CLONE_DIR", str(voices_dir))
+
+    bc = _make_brain_control(tmp_path, tts_handler=_FakeTTSHandler(voice="other_voice"), streamer=_FakeStreamer())
+
+    with caplog.at_level(logging.INFO, logger=brain_control.__name__):
+        ok, _ = bc._voice_delete("my_voice")
+
+    assert ok is True
+    assert "voice delete requested for my_voice" in caplog.text
+    assert "voice delete succeeded for my_voice" in caplog.text
+
+
+def test_voice_delete_logs_refusal_reason(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("VOICE_CLONE_DIR", str(tmp_path / "voices"))
+    bc = _make_brain_control(tmp_path, tts_handler=_FakeTTSHandler(voice="active_voice"), streamer=_FakeStreamer())
+
+    with caplog.at_level(logging.INFO, logger=brain_control.__name__):
+        ok, error = bc._voice_delete("active_voice")
+
+    assert ok is False
+    assert "voice delete requested for active_voice" in caplog.text
+    assert f"voice delete refused for active_voice: {error}" in caplog.text
 
 
 def test_voice_delete_unavailable_without_tts_handler(tmp_path):
