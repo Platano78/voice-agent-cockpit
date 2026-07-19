@@ -11,6 +11,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -471,10 +472,41 @@ def _mcp_text(result: dict) -> str:
     return ""
 
 
+# Frontmatter that survives when a `get` window opens partway INTO a YAML
+# block, so the leading "---" the parser looks for sits above the window. A bare
+# "name: foo-bar" line reads aloud as gibberish.
+#
+# Two narrow rules rather than one general `\w+:` pattern, because that also
+# matches real prose ("Result: it worked") and eating a sentence is worse than
+# speaking a stray key:
+#   - a known key, whose value may be a phrase ("description: a voice agent")
+#   - any lowercase key whose value is a SINGLE bare token ("degraded: false",
+#     "date: 20260511"). Prose keys are capitalised and prose values have
+#     spaces, so neither half of that shape fires on a real sentence.
+_FRONTMATTER_KEYS = frozenset(
+    "name description type tags date title metadata source url status project "
+    "category collection author created updated id slug layout".split()
+)
+_FRONTMATTER_RE = re.compile(
+    r"^(?:(?:" + "|".join(sorted(_FRONTMATTER_KEYS)) + r"):(?:\s|$)"
+    r"|[a-z][a-z0-9_-]{1,24}:\s*\S{0,40}$)"
+)
+# Bare URLs are the worst thing a TTS engine can meet — it spells them out
+# character by character. Markdown links keep their anchor text and lose the
+# target; naked URLs are dropped entirely.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:[^)]*)\)")
+_BARE_URL_RE = re.compile(r"\b(?:https?://|www\.)\S+")
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
 def _speakable(text: str, limit: int) -> str:
     """Flatten markdown into something a TTS voice can read: drop QMD's context
     comment, YAML frontmatter, rules and heading/emphasis punctuation, then
-    collapse whitespace and cap length."""
+    collapse whitespace and cap length.
+
+    Backticked identifiers keep their text (only the backticks go) — a listener
+    asking about their own notes wants to hear "voice_rules.py", and softening
+    it to "a file" would throw away the one concrete thing in the sentence."""
     raw = [l.strip() for l in text.splitlines()]
     # QMD prefixes every get() with a "<!-- Context: ... -->" comment and a
     # blank line; a window starting at line 1 then opens on YAML frontmatter,
@@ -491,9 +523,20 @@ def _speakable(text: str, limit: int) -> str:
             continue
         if stripped.startswith("#"):
             stripped = stripped.lstrip("#").strip()
-        lines.append(stripped)
+        # Frontmatter remnant from a window that opened inside a YAML block.
+        if _FRONTMATTER_RE.match(stripped):
+            continue
+        stripped = _BULLET_RE.sub("", stripped)
+        stripped = _MD_LINK_RE.sub(r"\1", stripped)
+        stripped = _BARE_URL_RE.sub("", stripped)
+        if stripped:
+            lines.append(stripped)
     flat = " ".join(" ".join(lines).split())
     flat = flat.replace("**", "").replace("`", "")
+    # Ellipses inside note prose get read as a literal pause-word by some
+    # engines; the trailing one _truncate adds is a length marker, not content.
+    flat = flat.replace("…", " ").replace("...", " ")
+    flat = " ".join(flat.split())
     if len(flat) <= limit:
         return flat
     return flat[: limit - 1].rstrip() + "…"
@@ -679,7 +722,7 @@ def _run_get_weather(place: str | None) -> str:
             geo.raise_for_status()
             results = geo.json().get("results") or []
             if not results:
-                return f"I couldn't find a place called {place!r}."
+                return f"I couldn't find a place called {place}."
             hit = results[0]
             lat, lon = hit["latitude"], hit["longitude"]
             label = hit.get("name", place)
@@ -713,23 +756,35 @@ def _run_get_weather(place: str | None) -> str:
         return sentence
 
 
+def _serp_title(title: str) -> str:
+    """Drop the trailing site-name segment SERP titles carry ("Paris -
+    Wikipedia"). Spoken, that suffix sounds like part of the fact. Only a short
+    tail is removed, so a real title containing a dash ("Paris - a history of
+    the left bank") keeps all of its words."""
+    for sep in (" - ", " | ", " — "):
+        head, found, tail = title.rpartition(sep)
+        if found and head and len(tail.split()) <= 3:
+            return head.strip()
+    return title.strip()
+
+
 def _run_web_search(query: str) -> str:
     from ddgs import DDGS
 
     with DDGS(timeout=int(_SEARCH_TIMEOUT_S)) as ddgs:
         hits = list(ddgs.text(query, max_results=3))
     if not hits:
-        return f"I didn't find any web results for {query!r}."
+        return f"I didn't find any web results for {query}."
     lines = []
     links = []
     for hit in hits[:3]:
-        title = (hit.get("title") or "").strip()
+        title = _serp_title((hit.get("title") or "").strip())
         body = (hit.get("body") or "").strip()
         # DDG instant-answer boxes sometimes return one run-on sentence with no
         # ". " breaks; a hard character cap keeps each line short regardless.
         snippet = body.split(". ")[0][:120].strip() if body else ""
         if title and snippet:
-            lines.append(f"{title} — {snippet}")
+            lines.append(f"{title}: {snippet.rstrip('.')}")
         elif title:
             lines.append(title)
         # ddgs text() hits carry the URL as `href`; fall back to `url`.
@@ -743,7 +798,8 @@ def _run_web_search(query: str) -> str:
             _cockpit.push_links(query, links)
         except Exception as e:
             logger.warning("voice_tools: push_links failed: %r", e)
-    return _truncate(" | ".join(lines))
+    # Sentences, not pipe-delimited rows: TTS reads "|" aloud as a word.
+    return _truncate(". ".join(lines) + "." if lines else "")
 
 
 def _qmd_query(query: str, collections: list[str] | None) -> list[dict]:
@@ -829,6 +885,12 @@ def _genesis_lane(query: str) -> list[str]:
     return lines
 
 
+def _no_knowledge(query: str) -> str:
+    # Plain quoting, not {!r}: repr wraps the topic in quote characters that
+    # some engines pronounce.
+    return f"I didn't find anything in your notes about {query}."
+
+
 def _run_knowledge_lookup(query: str) -> str:
     """Fan out to QMD (local notes) and Agent Genesis (past conversations) in
     parallel, then merge into one source-labelled result."""
@@ -851,7 +913,35 @@ def _run_knowledge_lookup(query: str) -> str:
             # down, and must not cost the other lane its results.
             logger.warning("voice_tools: knowledge lane %s failed: %r", label, e)
     if not lines:
-        return f"I didn't find anything in your notes about {query!r}."
+        return _no_knowledge(query)
+    # Relevance floor. QMD's `vec` sub-query ALWAYS returns its nearest
+    # neighbours, so an empty result set is nearly unreachable and the honest
+    # "found nothing" branch above almost never fired: asking about "zzzqqq
+    # nonexistent topic" produced a fluent 1631-character answer about an
+    # unrelated CUDA pull request. Spoken aloud, the listener has no way to tell
+    # that from a real answer, which makes a confident miss worse than silence.
+    #
+    # The scores cannot help — they are reciprocal-rank fusion, and come back as
+    # exactly 1.0 / 0.5 / 0.33 / 0.25 / 0.2 for EVERY query, nonsense included,
+    # so `minScore` filters by position, not by relevance. Probing the `lex`
+    # lane for a zero result was the other candidate and is also wrong: lex ANDs
+    # its terms, so a real question phrased as a sentence ("what did I write
+    # about personaplex") returns zero there while the topic is very much
+    # present.
+    #
+    # What does hold: if not one retrieved excerpt so much as mentions any topic
+    # word from the question, the fan-out returned neighbours rather than
+    # answers. Checked across the whole result set, not per document, so a
+    # semantically-relevant hit that happens to use different vocabulary still
+    # rides along with a literal one — this drops confident nonsense without
+    # undoing the content fix. Fails open: a question with no distinctive words
+    # left is never gated.
+    terms = _distinctive_terms(query)
+    if terms:
+        merged = " ".join(lines).lower()
+        if not any(term in merged for term in terms):
+            logger.info("voice_tools: knowledge hits missed every topic term %s", sorted(terms))
+            return _no_knowledge(query)
     return " ".join(lines)
 
 
@@ -868,10 +958,44 @@ _STOPWORDS = frozenset(
     "no there their they them again".split()
 )
 
+# Grammatical filler alone was not enough. People do not say "echo gate" at a
+# voice tool, they say "what was the DECISION ABOUT the echo gate" — and the
+# nouns and verbs framing the question are conversational scaffolding, never
+# content. Measured before this list existed: "echo gate" -> 3 hits, but the
+# spoken form retried as "decision echo gate" -> 0, because Faulkner ANDs every
+# term and no decision record contains the word "decision".
+#
+# Chosen over progressively dropping terms or OR-ing them: both widen recall
+# without bounding it, and against an AND backend the failure mode is a single
+# common word matching everything, which is exactly the confidently-wrong answer
+# this round is trying to eliminate. Removing words that carry no meaning is
+# loss-free by construction, and it is deterministic — the same sentence always
+# reduces to the same query.
+_SCAFFOLD_WORDS = frozenset(
+    "decision decisions decide decided deciding choose chose chosen choice pick "
+    "picked reason reasons rationale note notes noted say says said tell told "
+    "know known knew remember recall write wrote written thing things stuff "
+    "topic topics anything something everything please regarding".split()
+)
+
+
+def _significant(word: str) -> bool:
+    """A word that carries topic meaning: not filler, not scaffolding, and long
+    enough that an incidental substring match would be noise."""
+    word = word.lower().strip("?.,!'\";:")
+    return bool(word) and word not in _STOPWORDS and word not in _SCAFFOLD_WORDS
+
 
 def _content_words(query: str) -> str:
-    kept = [w for w in query.split() if w.lower().strip("?.,!'\"") not in _STOPWORDS]
+    kept = [w for w in query.split() if _significant(w)]
     return " ".join(kept)
+
+
+def _distinctive_terms(query: str) -> set[str]:
+    """The topic words a relevant answer should actually mention. Three
+    characters and up — shorter tokens ("ai", "os") match inside unrelated words
+    often enough to defeat the point of the check."""
+    return {w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) >= 3 and _significant(w)}
 
 
 def _faulkner_search(query: str) -> list[dict]:
@@ -915,13 +1039,13 @@ def _run_decision_lookup(query: str) -> str:
         if body:
             lines.append(f"Decision: {body}")
     if not lines:
-        return f"I didn't find a recorded decision about {query!r}."
+        return f"I didn't find a recorded decision about {query}."
     return " ".join(lines)
 
 
 def _run_set_mood(mood: str) -> str:
     if mood not in _MOODS:
-        return f"I don't have a {mood!r} mood — staying as is."
+        return f"I don't have a {mood} mood — staying as is."
     return f"Mood set to {mood}. Do not mention or announce the mood change — just continue the conversation naturally."
 
 

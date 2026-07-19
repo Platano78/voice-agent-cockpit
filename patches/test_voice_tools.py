@@ -604,3 +604,232 @@ def test_mcp_json_returns_empty_on_garbage():
             raise ValueError("not json")
 
     assert vt._mcp_json(_Resp()) == {}
+
+
+# ── relevance floor: the honest miss ─────────────────────────────────────
+#
+# QMD's `vec` sub-query always returns its nearest neighbours, so the "found
+# nothing" branch above was nearly unreachable and knowledge_lookup answered
+# nonsense questions with real content from unrelated documents. Probed live
+# against the box: every result set -- sensible or nonsense -- comes back scored
+# exactly 1.0 / 0.5 / 0.33 / 0.25 / 0.2 (reciprocal-rank fusion), so `minScore`
+# ranks by position and cannot gate on relevance. The floor is instead a check
+# that at least one excerpt mentions a topic word from the question.
+
+def test_nonsense_query_reports_an_honest_miss_despite_neighbour_hits():
+    """The live failure: 'zzzqqq nonexistent topic' returned a confident 1631-
+    character answer about an unrelated CUDA pull request."""
+    vt._mcp_call = _Router({
+        "query": _qmd_query_result([_hit("kb/cuda.md", "Q1_0 CUDA byte_perm PR")]),
+        "get": _qmd_get_result(
+            "Optimizes the Q1_0 CUDA dequant kernel to unpack ternary elements "
+            "via the byte_perm PTX instruction."
+        ),
+    })
+
+    out = vt._run_knowledge_lookup("zzzqqq nonexistent topic")
+
+    assert "didn't find anything" in out
+    assert "CUDA" not in out, "an unrelated neighbour must not be spoken as an answer"
+
+
+def test_relevant_hit_still_answers_in_full():
+    """The floor must not undo the content fix -- a real hit answers as before."""
+    vt._mcp_call = _Router({
+        "query": _qmd_query_result([_hit("kb/notes.md", "Echo gate")]),
+        "get": _qmd_get_result("The echo gate drops audio correlated with the last frame."),
+    })
+
+    out = vt._run_knowledge_lookup("what do my notes say about the echo gate")
+
+    assert "drops audio correlated" in out
+
+
+def test_one_relevant_hit_carries_its_semantically_matched_neighbours():
+    """Gated on the whole result set, not per document: vec earns its keep by
+    finding documents that match by meaning without sharing vocabulary, so those
+    ride along as long as something in the set is literally on topic."""
+    vt._mcp_call = _Router({
+        "query": _qmd_query_result([
+            _hit("kb/a.md", "A"),
+            _hit("kb/b.md", "B"),
+        ]),
+        "get": _qmd_get_result("wakeword arming is handled by the gate"),
+    })
+
+    out = vt._run_knowledge_lookup("wakeword")
+
+    assert "wakeword arming" in out
+
+
+def test_query_with_no_topic_words_is_never_gated():
+    """Fails open: if stripping leaves nothing to match on, answer anyway."""
+    vt._mcp_call = _Router({
+        "query": _qmd_query_result([_hit("kb/a.md", "A")]),
+        "get": _qmd_get_result("some unrelated body text"),
+    })
+
+    out = vt._run_knowledge_lookup("what do you know about that")
+
+    assert "some unrelated body text" in out
+
+
+def test_honest_miss_does_not_speak_repr_quotes():
+    vt._mcp_call = _Router({"query": _qmd_query_result([])})
+    out = vt._run_knowledge_lookup("banana helicopter zebra")
+    # {!r} used to wrap the topic in quote characters some engines pronounce.
+    assert "'banana helicopter zebra'" not in out
+    assert "banana helicopter zebra" in out
+
+
+# ── speakability ─────────────────────────────────────────────────────────
+#
+# Everything these tools return is spoken by a TTS engine, never read. A bare
+# URL is the worst case -- engines spell them out character by character.
+
+def test_urls_never_survive_into_spoken_output():
+    vt._mcp_call = _Router({
+        "query": _qmd_query_result([_hit("kb/esp.md", "ESP VoCat")]),
+        "get": _qmd_get_result(
+            "The esp vocat board is open hardware.\n"
+            "URL: https://gitee.com/esp-friends/esp-vocat-base\n"
+            "See www.example.com for more."
+        ),
+    })
+
+    out = vt._run_knowledge_lookup("esp vocat")
+
+    assert "https://" not in out and "gitee" not in out
+    assert "www." not in out
+    assert "open hardware" in out, "dropping the link must not drop the substance"
+
+
+def test_markdown_link_keeps_its_anchor_text_and_loses_the_target():
+    assert vt._speakable("See [the wakeword notes](https://example.com/x) today.", 200) == (
+        "See the wakeword notes today."
+    )
+
+
+def test_bullets_and_frontmatter_remnants_are_not_spoken():
+    text = (
+        "date: 20260511\n"
+        "source: nightly-synthesis\n"
+        "degraded: false\n"
+        "Decisions\n"
+        "- The spine was updated for NPC-M.\n"
+        "* Saves are multi-slot from the start.\n"
+        "1. Manual load is in for 1.0.\n"
+    )
+    out = vt._speakable(text, 400)
+
+    assert "date:" not in out and "degraded:" not in out and "nightly-synthesis" not in out
+    assert not out.startswith("-") and "- The spine" not in out
+    # The substance of every bullet survives; only the marker goes.
+    assert "The spine was updated for NPC-M." in out
+    assert "Saves are multi-slot from the start." in out
+    assert "Manual load is in for 1.0." in out
+
+
+def test_prose_with_a_colon_is_not_mistaken_for_frontmatter():
+    """The frontmatter rule must not eat real sentences."""
+    out = vt._speakable("Result: it worked on the second try.", 200)
+    assert "it worked on the second try" in out
+
+
+def test_backticked_identifiers_keep_their_text():
+    """A listener asking about their own notes wants to hear the real filename;
+    softening it to 'a file' throws away the one concrete thing in the sentence."""
+    out = vt._speakable("The rules live in `voice_rules.py` now.", 200)
+    assert "voice_rules.py" in out
+    assert "`" not in out
+
+
+def test_ellipsis_inside_note_prose_is_not_spoken():
+    out = vt._speakable("It works... mostly, and the rest is fine.", 200)
+    assert "..." not in out
+    assert "mostly" in out and "the rest is fine" in out
+
+
+# ── web_search reads as prose, not as a SERP ─────────────────────────────
+
+class _FakeDDGS:
+    hits: list = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def text(self, query, max_results=3):
+        return self.hits[:max_results]
+
+
+@pytest.fixture
+def _fake_ddgs(monkeypatch):
+    module = types.ModuleType("ddgs")
+    module.DDGS = _FakeDDGS
+    monkeypatch.setitem(sys.modules, "ddgs", module)
+    return _FakeDDGS
+
+
+def test_web_search_returns_prose_not_pipe_delimited_rows(_fake_ddgs):
+    """TTS reads '|' aloud as a word and '- Wikipedia' as part of the fact."""
+    _fake_ddgs.hits = [
+        {"title": "Paris - Wikipedia",
+         "body": "As the capital of France, Paris is a major European city. It has museums.",
+         "href": "https://en.wikipedia.org/wiki/Paris"},
+        {"title": "List of capitals of France - Wikipedia",
+         "body": "This is a chronological list.",
+         "href": "https://en.wikipedia.org/wiki/List"},
+    ]
+
+    out = vt._run_web_search("capital of France")
+
+    assert "|" not in out
+    assert "Wikipedia" not in out
+    assert "As the capital of France" in out, "the substance must survive"
+
+
+def test_web_search_keeps_a_real_title_that_contains_a_dash(_fake_ddgs):
+    """Only a short trailing site-name segment is dropped."""
+    _fake_ddgs.hits = [
+        {"title": "Paris - a history of the left bank",
+         "body": "A cultural history.", "href": "https://example.com/x"},
+    ]
+
+    out = vt._run_web_search("paris history")
+
+    assert "a history of the left bank" in out
+
+
+# ── decision_lookup on a spoken sentence ─────────────────────────────────
+
+def test_decision_lookup_succeeds_on_a_natural_spoken_sentence(monkeypatch):
+    """Measured live before the fix: 'echo gate' -> 3 hits, but 'what was the
+    decision about the echo gate' -> 0, and the retry kept the word 'decision'
+    and ANDed it, so that was 0 too. People speak sentences at this tool."""
+    fake = _FakeFaulkner({"echo gate": [_decision("Gate echo server-side.")]})
+    monkeypatch.setattr(vt.httpx, "Client", fake)
+
+    out = vt._run_decision_lookup("what was the decision about the echo gate")
+
+    assert fake.queries == ["what was the decision about the echo gate", "echo gate"]
+    assert "Gate echo server-side." in out
+
+
+def test_scaffolding_nouns_are_stripped_from_the_retry():
+    assert vt._content_words("what was the decision about the echo gate") == "echo gate"
+    assert vt._content_words("tell me the reason we chose two processes") == "two processes"
+    assert vt._content_words("what do my notes say about the wakeword") == "wakeword"
+
+
+def test_decision_miss_does_not_speak_repr_quotes(monkeypatch):
+    fake = _FakeFaulkner({})
+    monkeypatch.setattr(vt.httpx, "Client", fake)
+    out = vt._run_decision_lookup("why did we do that")
+    assert "'why did we do that'" not in out
+    assert "why did we do that" in out
