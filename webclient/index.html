@@ -807,6 +807,19 @@
      above, and still clickable: the probe may be stale, and a click either
      succeeds or produces the honest per-switch error anyway. */
   .brainOption.unreachable label { opacity: 0.7; }
+  /* Compact per-brain model picker, indented under the active brain's row
+     (see renderConfigState) -- same input styling as #voiceSelect etc. */
+  .brainModelRow { padding: 0 4px 6px 32px; }
+  .brainModelSelect {
+    width: 100%;
+    min-height: 36px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    font: 12px/1.4 inherit;
+  }
   #personaInput {
     width: 100%;
     min-height: 80px;
@@ -2701,6 +2714,48 @@ function renderConfigState(ev) {
       input.click();
     });
     els.brainList.appendChild(row);
+
+    // Per-brain model picker (ruling 2026-07-19): only inside the ACTIVE
+    // brain's row, and only when there's something to pick from -- a
+    // curated/live `models` list, or an override already set (so a
+    // hand-edited override missing from the list is still shown, never
+    // silently hidden).
+    if (b.name === ev.active_brain && ((b.models && b.models.length) || b.model_override)) {
+      const modelRow = document.createElement("div");
+      modelRow.className = "brainModelRow";
+      const select = document.createElement("select");
+      select.className = "brainModelSelect";
+      const defaultOpt = document.createElement("option");
+      defaultOpt.value = "";
+      defaultOpt.textContent = "Default — " + (b.model || "unset");
+      defaultOpt.selected = !b.model_override;
+      select.appendChild(defaultOpt);
+      const models = b.models || [];
+      models.forEach((id) => {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = id;
+        opt.selected = id === b.model_override;
+        select.appendChild(opt);
+      });
+      // A persisted override missing from the list (e.g. the endpoint's
+      // catalog changed) still gets shown, marked, and selected -- the panel
+      // must never silently disagree with what's actually in force.
+      if (b.model_override && !models.includes(b.model_override)) {
+        const opt = document.createElement("option");
+        opt.value = b.model_override;
+        opt.textContent = b.model_override + " (current)";
+        opt.selected = true;
+        select.appendChild(opt);
+      }
+      select.addEventListener("change", () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "config_set", brain_model: { brain: b.name, model: select.value } }));
+        }
+      });
+      modelRow.appendChild(select);
+      els.brainList.appendChild(modelRow);
+    }
   });
 
   if (ev.persona_tiers) lastPersonaTiers = ev.persona_tiers;

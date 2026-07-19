@@ -103,6 +103,45 @@ kept as an instant rollback (see below).
   narrowing later — **not** done here: `voice_rules.py` is load-bearing and a
   persona is user-editable, so a pipeline invariant must not be moved into one.
 
+  **Per-brain model selector.** A brain's endpoint can serve many models (an
+  NVIDIA NIM endpoint serves hundreds; a llama.cpp router a handful), but
+  `brains.json`'s `model` field is fixed at edit time. Overrides set from the
+  panel are written to `$HOME/speech-to-speech/model_overrides.json` (override
+  with `VOICE_MODEL_OVERRIDES_FILE`; default location is next to the persona
+  file) — same sidecar shape/atomicity/fail-safe-load contract as the persona
+  store: `{"version": 1, "brains": {"frontier": "deepseek-ai/deepseek-v3.2"}}`,
+  atomic writes, and a missing/corrupt file or a malformed per-brain entry
+  never takes the pipeline down. An override value must be non-empty, at most
+  `MODEL_OVERRIDE_MAX_CHARS` (200) characters, free of control characters, and
+  not the literal `"auto"` — `"auto"` is how a brain says "resolve whatever
+  the endpoint reports as loaded," so an override that read `"auto"` would be
+  indistinguishable from no override at all; clearing the override is the way
+  back to it.
+
+  `_effective_model(name, entry)` resolves the override-if-set, else the
+  entry's configured `model` (default `"auto"`) — this is what `_set_brain`
+  and the background reachability sweep both probe, so a probe now reflects
+  the override, not just brains.json. A brain entry MAY also carry a curated
+  `"models": ["id", ...]` array; `config_state`'s per-brain block reports it
+  (curated wins) or, absent that, whatever model ids the last successful
+  `/models` probe saw (parsed defensively out of the SAME response
+  `_resolve_model` already fetches — no second request — capped at 500 ids),
+  plus the current `model_override` ("" when none).
+
+  Control protocol: `config_set` takes `brain_model: {"brain": "<name>",
+  "model": "<id>"}`; an empty `model` clears the override, an unknown `brain`
+  acks an error. Setting the override for the ACTIVE brain re-runs the switch
+  (`_set_brain`) so the new effective model is probed for real BEFORE the
+  override is persisted — a failed probe rolls the candidate back and leaves
+  the on-disk store untouched, same probe-before-persist discipline as a
+  normal brain switch — and a successful change resets chat history (the
+  turns so far were produced by a different model). Setting the override for
+  a brain that ISN'T active persists it unprobed; it probes honestly the next
+  time that brain is switched to. Either way, a successful change broadcasts
+  a fresh `config_state` to every connected screen (the requester itself
+  resyncs via its own follow-up `config_get`, same as every other config_set
+  branch) — same reasoning as the voice-clone/voice-delete broadcasts below.
+
 - `websocket_streamer.py` — `speech_to_speech/connections/websocket_streamer.py`.
   Adds a `control_callback` constructor kwarg and a text-frame branch in
   `_handle_client`'s message loop: JSON text frames with

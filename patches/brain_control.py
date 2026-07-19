@@ -31,6 +31,21 @@ PERSONA_MAX_CHARS = 8000
 # character (and DEL) is a paste accident or a smuggled control sequence.
 _ALLOWED_CONTROL_CHARS = "\n\r\t"
 
+# Per-brain model override sidecar (ruling 1, 2026-07-19): a brains.json
+# entry's `model` is fixed at edit time, but an endpoint may serve many
+# models (NVIDIA NIM serves hundreds; a llama.cpp router a handful) -- this
+# lets the panel pick one per brain, persisted, without editing brains.json.
+# A model id is a single line of free text, unlike the multi-line persona, so
+# no control character is allowed through (not even newline/tab).
+MODEL_OVERRIDE_MAX_CHARS = 200
+
+# Cap on how many served model ids a `/models` probe records per brain
+# (ruling 4) -- an endpoint serving hundreds (NVIDIA NIM) must not bloat
+# `config_state` without bound.
+MAX_PROBED_MODEL_IDS = 500
+
+_MODEL_OVERRIDES_FILENAME = "model_overrides.json"
+
 # Shipped per-brain starting points. These are OFFERED, never auto-applied: a
 # preset only takes effect for a brain the user explicitly put in preset mode,
 # because silently preferring one over a global persona the user typed would
@@ -236,6 +251,144 @@ def save_persona_store(store: dict[str, Any]) -> None:
         logger.warning("BrainControl: failed to persist persona to %s: %s", path, e)
 
 
+# ── Per-brain model override sidecar ────────────────────────────────────
+#
+# Same shape/atomicity/fail-safe discipline as the persona store above, just
+# for one string per brain instead of a tiered persona. Default location is
+# next to the persona file (not a second hardcoded package-adjacent path) so
+# both sidecars land together without a second env var to remember by default.
+
+
+def model_overrides_path() -> Path:
+    raw = os.environ.get("VOICE_MODEL_OVERRIDES_FILE")
+    if raw:
+        return Path(raw).expanduser()
+    return persona_path().parent / _MODEL_OVERRIDES_FILENAME
+
+
+def validate_model_override(text: Any) -> tuple[bool, str]:
+    """Sanity-bound a user-submitted model id. Unlike a persona, empty is NOT
+    valid here -- an empty override is handled by the caller as "clear the
+    override", never persisted as text. `"auto"` is rejected: that's how a
+    brains.json entry says "resolve whatever the endpoint reports as loaded",
+    and an override that reads "auto" would be indistinguishable from having
+    no override at all -- clearing the override is the way back to it."""
+    if not isinstance(text, str):
+        return False, "model override must be text"
+    if not text:
+        return False, "model override must not be empty"
+    if len(text) > MODEL_OVERRIDE_MAX_CHARS:
+        return False, f"model override exceeds the {MODEL_OVERRIDE_MAX_CHARS} character cap"
+    if text == "auto":
+        return False, 'model override cannot be "auto" -- clear the override to restore the configured default'
+    for ch in text:
+        if ord(ch) < 32 or ord(ch) == 127:
+            return False, "model override contains control characters"
+    return True, ""
+
+
+def empty_model_override_store() -> dict[str, Any]:
+    return {"version": 1, "brains": {}}
+
+
+def _sanitize_model_override_entry(raw: Any) -> Optional[str]:
+    """Normalize one stored override, or None if it's unusable -- dropped
+    rather than raising, same one-bad-entry-must-not-cost-the-rest contract
+    as `_sanitize_brain_entry`."""
+    if not isinstance(raw, str):
+        return None
+    ok, _ = validate_model_override(raw)
+    if not ok:
+        return None
+    return raw
+
+
+def load_model_override_store() -> dict[str, Any]:
+    """Read the persisted model-override store, always returning a usable
+    dict. Fail-safe by construction (runs at pipeline startup): a missing,
+    unreadable, or corrupt file logs and yields an empty store rather than
+    raising; a single malformed brain entry is dropped, not fatal."""
+    path = model_overrides_path()
+    store = empty_model_override_store()
+    try:
+        with open(path, "r") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return store
+    except (OSError, ValueError) as e:
+        logger.warning("BrainControl: ignoring unreadable model override file %s: %s", path, e)
+        return store
+
+    if not isinstance(payload, dict):
+        logger.warning("BrainControl: ignoring malformed model override file %s: not an object", path)
+        return store
+
+    raw_brains = payload.get("brains")
+    if isinstance(raw_brains, dict):
+        for name, raw_entry in raw_brains.items():
+            entry = _sanitize_model_override_entry(raw_entry) if isinstance(name, str) else None
+            if entry is None:
+                logger.warning("BrainControl: dropping unusable model override for brain %r in %s", name, path)
+                continue
+            store["brains"][name] = entry
+    elif raw_brains is not None:
+        logger.warning("BrainControl: ignoring malformed `brains` in %s: not an object", path)
+
+    return store
+
+
+def save_model_override_store(store: dict[str, Any]) -> None:
+    """Persist `store`, or delete the file when nothing is configured. Same
+    atomic-write/best-effort contract as `save_persona_store`."""
+    path = model_overrides_path()
+    payload = {
+        "version": 1,
+        "brains": {k: v for k, v in (store.get("brains") or {}).items() if v},
+    }
+    try:
+        if not payload["brains"]:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(path.name + ".tmp")
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError as e:
+        logger.warning("BrainControl: failed to persist model overrides to %s: %s", path, e)
+
+
+def _extract_model_ids(data: Any) -> list[str]:
+    """Defensively parse served model ids out of a `/models` GET's `data`
+    list -- llama.cpp router entries carry `{"id", "status": {...}}`, plain
+    OpenAI-style lists just `{"id"}`. Non-dict entries and non-string/empty
+    ids are skipped rather than raising; capped at `MAX_PROBED_MODEL_IDS`."""
+    ids: list[str] = []
+    if not isinstance(data, list):
+        return ids
+    for entry in data:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]:
+            ids.append(entry["id"])
+        if len(ids) >= MAX_PROBED_MODEL_IDS:
+            break
+    return ids
+
+
+def _curated_models(entry: dict[str, Any]) -> list[str]:
+    """A brains.json entry MAY carry a curated `models` list (ruling 3) --
+    filtered defensively since brains.json is hand-edited."""
+    curated = entry.get("models")
+    if not isinstance(curated, list):
+        return []
+    return [m for m in curated if isinstance(m, str) and m]
+
+
 def resolve_persona(store: dict[str, Any], brain: str, default: str) -> tuple[str, str]:
     """Resolve the effective persona for `brain`, most specific tier first.
 
@@ -300,6 +453,10 @@ class BrainControl:
         self.persona_store = load_persona_store()
         self.persona_tier = TIER_DEFAULT
         self._apply_persona()
+        # Same startup precedence as the persona store, one tier only: an
+        # override persisted from the panel wins over brains.json's `model`
+        # field until cleared. Read by `_effective_model`.
+        self.model_overrides = load_model_override_store()
         # RLock, not Lock: `_set_brain` records its probe result (below) while
         # already holding this lock via `_config_set`'s outer `with`, and the
         # background reconcile thread also needs to take it around its own
@@ -318,6 +475,14 @@ class BrainControl:
         self._reconcile_in_progress = False
         self._last_reconcile_start: Optional[float] = None
         self._reconcile_thread: Optional[threading.Thread] = None
+        # Thread-local scratch space for the model ids a `_resolve_model` GET
+        # just saw, read by the caller on the SAME thread immediately after
+        # the call returns (see `_resolve_model`'s docstring). Thread-local,
+        # not a plain instance attribute: `_set_brain` (a config_set thread)
+        # and the background reconcile thread can each be mid-probe of a
+        # DIFFERENT brain at once, and a shared attribute would let one
+        # overwrite the other's in-flight result.
+        self._probed_model_ids = threading.local()
         self.tools_armed = 0
         try:
             armed = voice_tools.get_tool_defs()
@@ -399,8 +564,16 @@ class BrainControl:
         (llama-cpp router schema), falling back to the first listed model id for
         plain OpenAI-style lists. For a fixed model name, the GET is purely a
         reachability probe (fail closed on error). Returns None on any failure.
+
+        As a side effect (ruling 4), also parses every served model id out of
+        this SAME response into `self._probed_model_ids.ids` -- read by the
+        caller right after this call returns -- so a caller that wants the
+        live list doesn't have to issue a second `/models` GET.
         """
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        # Reset up front: a failed GET below must not leave a PRIOR call's
+        # ids attributed to this one.
+        self._probed_model_ids.ids = []
         try:
             resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=3.0, headers=headers)
             resp.raise_for_status()
@@ -408,6 +581,8 @@ class BrainControl:
         except Exception as e:
             logger.warning("BrainControl: model probe failed for %s: %s", base_url, e)
             return None
+
+        self._probed_model_ids.ids = _extract_model_ids(data)
 
         if not data:
             return None
@@ -473,7 +648,7 @@ class BrainControl:
             "models": gate.available_models(),
         }
 
-    def _record_probe(self, name: str, ok: bool, error: str) -> bool:
+    def _record_probe(self, name: str, ok: bool, error: str, models: Optional[list[str]] = None) -> bool:
         """Atomically record the outcome of an actual reachability probe for
         `name` and report whether the OBSERVABLE state changed.
 
@@ -491,11 +666,16 @@ class BrainControl:
         the lock fresh) -- reentrant-safe because `_config_lock` is an RLock.
         `_set_brain`'s callers ignore the return value; only the reconcile
         loop needs it.
+
+        `models` (ruling 4) is the list of ids this SAME probe's `/models` GET
+        saw, or `None`/empty when the caller has none (an unreachable brain,
+        or an older call site). It is NOT part of the changed-detection
+        compare -- only `ok`/`error` gate a broadcast, same as before.
         """
         with self._config_lock:
             before = self._brain_probes.get(name)
             changed = before is None or before.get("ok") != ok or before.get("error") != error
-            self._brain_probes[name] = {"ok": ok, "at": time.monotonic(), "error": error}
+            self._brain_probes[name] = {"ok": ok, "at": time.monotonic(), "error": error, "models": models or []}
             return changed
 
     def _maybe_start_reconcile(self) -> None:
@@ -530,14 +710,15 @@ class BrainControl:
                 if not entry.get("available", False):
                     continue
                 base_url = entry.get("base_url")
-                model = entry.get("model", "auto")
+                model = self._effective_model(name, entry)
                 api_key = self._resolve_api_key(entry)
                 # Network probe stays OUTSIDE the lock -- only the
                 # compare-and-record in `_record_probe` needs it.
                 resolved = self._resolve_model(base_url, model, api_key)
+                probed_models = getattr(self._probed_model_ids, "ids", [])
                 ok = resolved is not None
                 error = "" if ok else f"model probe failed for {name}"
-                changed |= self._record_probe(name, ok, error)
+                changed |= self._record_probe(name, ok, error, probed_models)
             if changed and self.streamer is not None:
                 self.streamer.broadcast_json(self._config_state())
         except Exception:
@@ -566,6 +747,14 @@ class BrainControl:
                     "name": name,
                     "label": entry.get("label", name),
                     "model": entry.get("model", ""),
+                    # The persisted override, "" when none (ruling 5) -- the
+                    # panel marks this option selected in its per-brain picker.
+                    "model_override": (self.model_overrides.get("brains") or {}).get(name, ""),
+                    # A curated list (brains.json's `models`, ruling 3) always
+                    # wins over the live-probed list -- the operator's own
+                    # curation is more trustworthy than whatever an endpoint
+                    # happened to report last. Empty when neither exists.
+                    "models": _curated_models(entry) or probes.get(name, {}).get("models", []),
                     "available": entry.get("available", False),
                     "note": entry.get("note", ""),
                     # Observed, not configured -- null until a switch attempt
@@ -595,6 +784,19 @@ class BrainControl:
                     # persona is a property of the brain in force, not of the
                     # session, so re-resolve before anything else reads it.
                     self._apply_persona()
+            if "brain_model" in msg:
+                ok, error, needs_reset = self._set_brain_model(msg["brain_model"])
+                if not ok:
+                    return {"type": "config_ack", "ok": False, "error": error}
+                if needs_reset:
+                    chat_reset = True
+                # Broadcast explicitly (ruling 6): the requester resyncs via
+                # its own follow-up config_get after this ack, same as every
+                # other config_set branch, but OTHER connected screens only
+                # see a model-override change through this -- same reasoning
+                # as the voice_delete/voice_clone broadcasts elsewhere here.
+                if self.streamer is not None:
+                    self.streamer.broadcast_json(self._config_state())
             if "voice" in msg:
                 ok, error = self._set_voice(msg["voice"])
                 if not ok:
@@ -714,6 +916,14 @@ class BrainControl:
             "permission_respond": {"id": perm_id, "approve": approve, "message": message},
         }
 
+    def _effective_model(self, name: str, entry: dict[str, Any]) -> str:
+        """Resolve the model actually requested for `name`: a persisted
+        override wins (ruling 2), else `entry`'s configured `model` field
+        (defaulting to `"auto"`, same default `_set_brain` used before
+        overrides existed)."""
+        override = (self.model_overrides.get("brains") or {}).get(name)
+        return override or entry.get("model", "auto")
+
     def _set_brain(self, name: str) -> tuple[bool, str]:
         entry = self.brains.get(name)
         if entry is None:
@@ -722,15 +932,16 @@ class BrainControl:
             return False, entry.get("note") or f"brain not available: {name}"
 
         base_url = entry["base_url"]
-        model = entry.get("model", "auto")
+        model = self._effective_model(name, entry)
         api_key = self._resolve_api_key(entry)
         resolved = self._resolve_model(base_url, model, api_key)
+        probed_models = getattr(self._probed_model_ids, "ids", [])
         if resolved is None:
             error = f"model probe failed for {name}"
             # Recorded on failure too (not just success): a failed switch must
             # immediately mark the brain unreachable in the next config_state,
             # not wait for the next background sweep.
-            self._record_probe(name, False, error)
+            self._record_probe(name, False, error, probed_models)
             return False, error
 
         # Same swap + _extra_body rule as BaseOpenAICompatibleHandler.setup()
@@ -739,8 +950,78 @@ class BrainControl:
         self.llm_handler.model_name = resolved
         self.llm_handler._extra_body = BaseOpenAICompatibleHandler._build_extra_body(base_url, True, None)
         self.active_brain = name
-        self._record_probe(name, True, "")
+        self._record_probe(name, True, "", probed_models)
         return True, ""
+
+    def _set_brain_model(self, payload: Any) -> tuple[bool, str, bool]:
+        """Handle a `brain_model` config_set payload: set or clear a
+        per-brain model override. Returns `(ok, error, chat_reset)`.
+
+        Probe-before-persist (ruling 6): when `name` is the ACTIVE brain and
+        the effective model actually changes, the candidate override is
+        staged in memory and `_set_brain` is re-run on the same brain -- it
+        reads the staged value via `_effective_model` and probes it for
+        real. A failed probe rolls the staged value back and nothing is
+        written to disk (the failed probe already recorded the brain
+        unreachable via `_set_brain`'s own `_record_probe` call). Only a
+        successful probe persists, and only then is chat reset -- the turns
+        so far were produced by a different model. When `name` is NOT the
+        active brain, the override is persisted unprobed; it will probe
+        honestly the next time that brain is switched to.
+        """
+        if not isinstance(payload, dict):
+            return False, "invalid brain_model payload", False
+        name = payload.get("brain")
+        if not isinstance(name, str) or name not in self.brains:
+            return False, f"unknown brain: {name}", False
+        model = payload.get("model") or ""
+        if not isinstance(model, str):
+            return False, "model must be text", False
+        if model:
+            ok, error = validate_model_override(model)
+            if not ok:
+                return False, error, False
+
+        entry = self.brains[name]
+        brains_overrides = self.model_overrides.setdefault("brains", {})
+        prev_override = brains_overrides.get(name)
+        new_override = model or None
+
+        def _stage(value: Optional[str]) -> None:
+            if value:
+                brains_overrides[name] = value
+            else:
+                brains_overrides.pop(name, None)
+
+        current_effective = prev_override or entry.get("model", "auto")
+        new_effective = new_override or entry.get("model", "auto")
+        needs_probe = name == self.active_brain and new_effective != current_effective
+
+        if not needs_probe:
+            _stage(new_override)
+            save_model_override_store(self.model_overrides)
+            return True, "", False
+
+        _stage(new_override)
+        try:
+            ok, error = self._set_brain(name)
+        except Exception:
+            # `_set_brain` isn't expected to raise (its own probe failures
+            # return False), but anything outside `_resolve_model`'s catches
+            # (e.g. the OpenAI client constructor) would otherwise leave the
+            # staged override in `self.model_overrides` -- reported by
+            # config_state as an override that never probed and isn't on
+            # disk, then silently gone on restart. `handle()`'s top-level
+            # except still turns this into an error ack; our only job here
+            # is to not leave staged state behind.
+            _stage(prev_override)
+            raise
+        if not ok:
+            _stage(prev_override)
+            return False, error, False
+
+        save_model_override_store(self.model_overrides)
+        return True, "", True
 
     def _set_voice(self, name: str) -> tuple[bool, str]:
         if self.tts_handler is None:

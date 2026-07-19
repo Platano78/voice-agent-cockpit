@@ -40,6 +40,15 @@ you at install time.
   local (llama.cpp, vLLM, Ollama, etc.) or hosted. `patches/brain_control.py`
   lets you register several brains in `brains.json` and hot-swap between them
   from the cockpit UI without restarting the service.
+- A brain's endpoint can serve more than one model — an NVIDIA NIM endpoint
+  serves hundreds, a llama.cpp router a handful — so `brains.json`'s `model`
+  field is only the *configured default*. Add a `"models": ["id", ...]` array
+  to a brain entry to curate the list the settings panel offers for it; if you
+  don't, the panel falls back to whatever the last live `/v1/models` probe of
+  that endpoint reported. Either way, picking a model from the panel writes a
+  per-brain override (persisted to a sidecar file, see `VOICE_MODEL_OVERRIDES_FILE`
+  below) that beats the configured default until you clear it — it never edits
+  `brains.json` itself.
 
 ### One conversation, many screens
 
@@ -158,6 +167,7 @@ them.
 | `QMD_MCP_URL` | `http://localhost:8070/mcp` | optional QMD knowledge endpoint (voice tools) |
 | `VOICE_TOOLS` | *(unset)* | pin the armed voice-tool set to a comma-separated list |
 | `VOICE_TOOLS_DIR` | *(unset)* | directory of drop-in local voice tools (one `.py` per tool) |
+| `VOICE_MODEL_OVERRIDES_FILE` | next to your persona file, `model_overrides.json` | where per-brain model overrides set from the panel are stored |
 | `VOICE_CLONE_DIR` | `~/speech-to-speech/voices` | where custom (cloned) voice states are stored |
 | `VOICE_AUDITION_TEXT` | `Hi, I'm {name}. This is how I sound.` | sample spoken after a voice switch; `off` disables |
 | `VOICE_PHONE_CONTEXT` | *(unset)* | set to `off` to disable phone context server-side, even if a client has it toggled on |

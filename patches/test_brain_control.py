@@ -839,3 +839,482 @@ def test_presets_are_plausible_voice_system_prompts():
         assert 100 < len(text) < brain_control.PERSONA_MAX_CHARS, name
         assert "spoken aloud" in text, name
         assert "*" not in text and "#" not in text, name
+
+
+# ── per-brain model selector (ruling 2026-07-19) ────────────────────────
+#
+# A brain's endpoint can serve many models (NVIDIA NIM serves hundreds; a
+# llama.cpp router a handful); brains.json's `model` field was fixed at edit
+# time. These cover the model-override sidecar, effective-model resolution,
+# the `config_set{brain_model}` protocol, and the live/curated model lists
+# surfaced in `config_state`.
+
+
+def _model_overrides_env(tmp_path, monkeypatch):
+    path = tmp_path / "model_dir" / "model_overrides.json"
+    monkeypatch.setenv("VOICE_MODEL_OVERRIDES_FILE", str(path))
+    return path
+
+
+def _stub_switch(monkeypatch):
+    """Let a real `_set_brain` probe/switch succeed without a live endpoint --
+    same stub as the reachability tests above, needed here because
+    `_set_brain_model` re-runs `_set_brain` on the active brain."""
+    monkeypatch.setattr(
+        brain_control.BaseOpenAICompatibleHandler, "_build_extra_body", staticmethod(lambda *a, **k: None),
+        raising=False,
+    )
+
+
+# ── validate_model_override ──────────────────────────────────────────────
+
+
+def test_validate_model_override_accepts_a_normal_id():
+    assert brain_control.validate_model_override("deepseek-ai/deepseek-v3.2") == (True, "")
+
+
+def test_validate_model_override_rejects_empty():
+    ok, error = brain_control.validate_model_override("")
+    assert ok is False
+    assert "empty" in error
+
+
+def test_validate_model_override_rejects_non_string():
+    ok, error = brain_control.validate_model_override(None)
+    assert ok is False
+    assert "text" in error
+
+
+def test_validate_model_override_rejects_auto():
+    """Clearing the override is the only way back to the configured default --
+    an override of literally "auto" would be indistinguishable from none."""
+    ok, error = brain_control.validate_model_override("auto")
+    assert ok is False
+    assert "auto" in error
+
+
+def test_validate_model_override_rejects_oversize():
+    ok, error = brain_control.validate_model_override("x" * (brain_control.MODEL_OVERRIDE_MAX_CHARS + 1))
+    assert ok is False
+    assert "character cap" in error
+
+
+def test_validate_model_override_rejects_control_characters():
+    ok, error = brain_control.validate_model_override("sneaky\x1b[31m escape")
+    assert ok is False
+    assert "control characters" in error
+
+
+def test_validate_model_override_rejects_newline_unlike_persona():
+    """Unlike the multi-line persona, a model id is single-line free text --
+    no control character is allowed through, not even newline/tab."""
+    ok, error = brain_control.validate_model_override("model\nid")
+    assert ok is False
+    assert "control characters" in error
+
+
+# ── model override store: load/save, fail-safe, defaults ────────────────
+
+
+def test_model_overrides_path_defaults_next_to_the_persona_file(tmp_path, monkeypatch):
+    persona_file = tmp_path / "persona_dir" / "persona.json"
+    monkeypatch.setenv("VOICE_PERSONA_FILE", str(persona_file))
+    monkeypatch.delenv("VOICE_MODEL_OVERRIDES_FILE", raising=False)
+
+    assert brain_control.model_overrides_path() == persona_file.parent / "model_overrides.json"
+
+
+def test_model_overrides_path_is_env_overridable(tmp_path, monkeypatch):
+    path = tmp_path / "elsewhere" / "overrides.json"
+    monkeypatch.setenv("VOICE_MODEL_OVERRIDES_FILE", str(path))
+    assert brain_control.model_overrides_path() == path
+
+
+def test_model_override_store_roundtrip(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    store = {"version": 1, "brains": {"frontier": "deepseek-ai/deepseek-v3.2"}}
+
+    brain_control.save_model_override_store(store)
+
+    assert json.loads(path.read_text()) == store
+    assert brain_control.load_model_override_store() == store
+
+
+def test_missing_model_overrides_file_falls_back_to_empty(tmp_path, monkeypatch):
+    _model_overrides_env(tmp_path, monkeypatch)
+    assert brain_control.load_model_override_store() == brain_control.empty_model_override_store()
+
+
+def test_save_model_overrides_deletes_the_file_when_empty(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    brain_control.save_model_override_store({"version": 1, "brains": {"coder": "x"}})
+    assert path.is_file()
+
+    brain_control.save_model_override_store({"version": 1, "brains": {}})
+
+    assert not path.exists()
+
+
+def test_corrupt_model_overrides_file_does_not_raise(tmp_path, monkeypatch, caplog):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"version": 1, "brains": {truncated')
+
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        store = brain_control.load_model_override_store()
+
+    assert store == brain_control.empty_model_override_store()
+    assert "unreadable model override file" in caplog.text
+
+
+def test_unreadable_model_overrides_file_falls_back(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    path.mkdir(parents=True)  # a directory where the file should be
+
+    assert brain_control.load_model_override_store() == brain_control.empty_model_override_store()
+
+
+def test_non_object_model_overrides_file_falls_back(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text("[]")
+
+    assert brain_control.load_model_override_store() == brain_control.empty_model_override_store()
+
+
+def test_malformed_model_override_entries_are_dropped_not_fatal(tmp_path, monkeypatch):
+    """One unusable brain's override must not cost the user the others."""
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "version": 1,
+        "brains": {
+            "coder": "good-model",
+            "local": "",
+            "hermes": 12345,
+            "frontier": "auto",
+        },
+    }))
+
+    store = brain_control.load_model_override_store()
+
+    assert store["brains"] == {"coder": "good-model"}
+
+
+def test_brains_key_of_the_wrong_type_is_ignored(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"version": 1, "brains": "not an object"}')
+
+    assert brain_control.load_model_override_store() == {"version": 1, "brains": {}}
+
+
+# ── _extract_model_ids / _curated_models ────────────────────────────────
+
+
+def test_extract_model_ids_parses_llama_cpp_router_shape():
+    data = [{"id": "a", "status": {"value": "loaded"}}, {"id": "b", "status": {"value": "unloaded"}}]
+    assert brain_control._extract_model_ids(data) == ["a", "b"]
+
+
+def test_extract_model_ids_parses_plain_openai_shape():
+    assert brain_control._extract_model_ids([{"id": "x"}, {"id": "y"}]) == ["x", "y"]
+
+
+def test_extract_model_ids_is_defensive_against_garbage():
+    assert brain_control._extract_model_ids(None) == []
+    assert brain_control._extract_model_ids("not a list") == []
+    assert brain_control._extract_model_ids([{"no_id": 1}, "not a dict", {"id": 123}, {"id": ""}]) == []
+
+
+def test_extract_model_ids_caps_at_500():
+    data = [{"id": f"m{i}"} for i in range(600)]
+    ids = brain_control._extract_model_ids(data)
+    assert len(ids) == 500
+    assert ids[0] == "m0" and ids[-1] == "m499"
+
+
+def test_curated_models_filters_non_string_entries():
+    assert brain_control._curated_models({"models": ["a", 1, "", None, "b"]}) == ["a", "b"]
+
+
+def test_curated_models_absent_yields_empty():
+    assert brain_control._curated_models({}) == []
+    assert brain_control._curated_models({"models": "not a list"}) == []
+
+
+# ── effective-model resolution ───────────────────────────────────────────
+
+
+def test_effective_model_falls_back_to_configured_without_an_override(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    assert bc._effective_model("coder", {"model": "configured-model"}) == "configured-model"
+
+
+def test_effective_model_falls_back_to_auto_with_no_model_field(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    assert bc._effective_model("coder", {}) == "auto"
+
+
+def test_effective_model_override_beats_configured(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.model_overrides = {"version": 1, "brains": {"coder": "override-model"}}
+    assert bc._effective_model("coder", {"model": "configured-model"}) == "override-model"
+
+
+def test_effective_model_override_is_per_brain(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.model_overrides = {"version": 1, "brains": {"coder": "override-model"}}
+    assert bc._effective_model("local", {"model": "configured-model"}) == "configured-model"
+
+
+def test_clearing_an_override_restores_the_configured_default(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.model_overrides = {"version": 1, "brains": {"coder": "override-model"}}
+    assert bc._effective_model("coder", {"model": "configured-model"}) == "override-model"
+
+    bc.model_overrides["brains"].pop("coder")
+
+    assert bc._effective_model("coder", {"model": "configured-model"}) == "configured-model"
+
+
+# ── config_set{brain_model} protocol ─────────────────────────────────────
+
+
+def test_brain_model_unknown_brain_errors(tmp_path):
+    bc = _make_brain_control(tmp_path)
+
+    ack = bc._config_set({"brain_model": {"brain": "nope", "model": "x"}})
+
+    assert ack["ok"] is False
+    assert "unknown brain" in ack["error"]
+
+
+def test_brain_model_rejects_auto(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+
+    ack = bc._config_set({"brain_model": {"brain": "coder", "model": "auto"}})
+
+    assert ack["ok"] is False
+    assert "auto" in ack["error"]
+
+
+def test_brain_model_rejects_oversize(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+
+    ack = bc._config_set(
+        {"brain_model": {"brain": "coder", "model": "x" * (brain_control.MODEL_OVERRIDE_MAX_CHARS + 1)}}
+    )
+
+    assert ack["ok"] is False
+    assert "character cap" in ack["error"]
+
+
+def test_brain_model_rejects_control_characters(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+
+    ack = bc._config_set({"brain_model": {"brain": "coder", "model": "sneaky\x1b[31m"}})
+
+    assert ack["ok"] is False
+    assert "control characters" in ack["error"]
+
+
+def test_brain_model_active_brain_probes_persists_and_resets_chat(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+    _stub_switch(monkeypatch)
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "new-model")
+
+    ack = bc._config_set({"brain_model": {"brain": "coder", "model": "new-model"}})
+
+    assert ack["ok"] is True
+    assert ack["chat_reset"] is True
+    assert bc.model_overrides["brains"]["coder"] == "new-model"
+    assert json.loads(path.read_text())["brains"]["coder"] == "new-model"
+    assert len(streamer.broadcasts) == 1
+    assert streamer.broadcasts[0]["type"] == "config_state"
+
+
+def test_brain_model_active_brain_failed_probe_does_not_persist_or_reset(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: None)
+
+    ack = bc._config_set({"brain_model": {"brain": "coder", "model": "new-model"}})
+
+    assert ack["ok"] is False
+    assert bc.model_overrides.get("brains", {}).get("coder") is None
+    assert not path.exists()
+    assert streamer.broadcasts == []
+    # The switch's own failed probe still recorded the brain unreachable.
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+    assert entry["reachable"] is False
+
+
+def test_brain_model_active_brain_set_brain_raising_rolls_back_the_staged_override(tmp_path, monkeypatch):
+    """`_set_brain` isn't expected to raise, but anything outside
+    `_resolve_model`'s own catches (e.g. the OpenAI client constructor) must
+    still roll the staged override back -- otherwise it's left live in
+    memory (config_state would report an override that never probed and
+    isn't on disk) and silently evaporates on the next restart."""
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bc, "_resolve_model", _boom)
+
+    # Via handle(): its own top-level try/except is what turns the raise
+    # into an error ack -- _set_brain_model's job is only to not leave
+    # staged state behind before that happens.
+    ack = bc.handle({"type": "config_set", "brain_model": {"brain": "coder", "model": "new-model"}})
+
+    assert ack["type"] == "config_ack"
+    assert ack["ok"] is False
+    assert bc.model_overrides.get("brains", {}).get("coder") is None
+    assert not path.exists()
+    assert streamer.broadcasts == []
+    assert bc._config_state()["brains"][0]["model_override"] == ""
+
+
+def test_brain_model_non_active_brain_persists_without_probing(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)  # active_brain defaults to "coder"
+    bc.brains = {
+        "coder": {"available": True, "base_url": "http://x", "model": "base-model"},
+        "local": {"available": True, "base_url": "http://y", "model": "local-model"},
+    }
+    probe_calls = []
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: probe_calls.append(1))
+
+    ack = bc._config_set({"brain_model": {"brain": "local", "model": "custom-local-model"}})
+
+    assert ack["ok"] is True
+    assert ack["chat_reset"] is False
+    assert probe_calls == []
+    assert json.loads(path.read_text())["brains"]["local"] == "custom-local-model"
+    assert len(streamer.broadcasts) == 1
+
+
+def test_brain_model_empty_clears_the_override(tmp_path, monkeypatch):
+    path = _model_overrides_env(tmp_path, monkeypatch)
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+    _stub_switch(monkeypatch)
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "override-model")
+    bc._config_set({"brain_model": {"brain": "coder", "model": "override-model"}})
+    assert path.is_file()
+
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "base-model")
+    ack = bc._config_set({"brain_model": {"brain": "coder", "model": ""}})
+
+    assert ack["ok"] is True
+    assert "coder" not in bc.model_overrides.get("brains", {})
+    assert not path.exists()
+
+
+def test_brain_model_none_streamer_is_safe(tmp_path, monkeypatch):
+    _model_overrides_env(tmp_path, monkeypatch)
+    bc = _make_brain_control(tmp_path, streamer=None)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+    _stub_switch(monkeypatch)
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "new-model")
+
+    ack = bc._config_set({"brain_model": {"brain": "coder", "model": "new-model"}})  # must not raise
+
+    assert ack["ok"] is True
+
+
+# ── config_state: model_override / models (curated vs live) ─────────────
+
+
+def test_config_state_reports_model_override_and_empty_models_by_default(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+
+    assert entry["model"] == "base-model"
+    assert entry["model_override"] == ""
+    assert entry["models"] == []
+
+
+def test_config_state_reports_the_persisted_override(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "base-model"}}
+    bc.model_overrides = {"version": 1, "brains": {"coder": "override-model"}}
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+
+    assert entry["model_override"] == "override-model"
+
+
+def test_config_state_curated_models_win_over_live_list(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "models": ["curated-a", "curated-b"]}}
+    bc._brain_probes["coder"] = {"ok": True, "at": 0.0, "error": "", "models": ["live-a", "live-b"]}
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+
+    assert entry["models"] == ["curated-a", "curated-b"]
+
+
+def test_config_state_falls_back_to_the_live_list_without_a_curated_one(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    bc._brain_probes["coder"] = {"ok": True, "at": 0.0, "error": "", "models": ["live-a", "live-b"]}
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+
+    assert entry["models"] == ["live-a", "live-b"]
+
+
+def test_live_model_list_captured_from_a_probe_shows_up_in_config_state(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    _stub_switch(monkeypatch)
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": "model-a"}, {"id": "model-b", "status": {"value": "loaded"}}]}
+
+    monkeypatch.setattr(brain_control.httpx, "get", lambda *a, **k: _FakeResp())
+
+    ok, error = bc._set_brain("coder")
+
+    assert ok is True
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+    assert entry["models"] == ["model-a", "model-b"]
+
+
+def test_live_model_list_capped_at_500(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "fixed-model"}}
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": f"m{i}"} for i in range(600)]}
+
+    monkeypatch.setattr(brain_control.httpx, "get", lambda *a, **k: _FakeResp())
+
+    resolved = bc._resolve_model("http://x", "fixed-model", None)
+
+    assert resolved == "fixed-model"
+    assert len(bc._probed_model_ids.ids) == 500
