@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from typing import Any, Optional
 
 from pathlib import Path
@@ -86,6 +87,26 @@ TIER_BRAIN_CUSTOM = "brain_custom"
 TIER_BRAIN_PRESET = "brain_preset"
 TIER_GLOBAL = "global"
 TIER_DEFAULT = "default"
+
+# How often the background reachability sweep (kicked from config_get) may
+# start, at most. Not a request rate limit -- opening the settings panel
+# repeatedly must not turn into a serial probe storm against every brain.
+_DEFAULT_PROBE_DEBOUNCE_S = 20.0
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """Read a numeric env var, falling back to `default` on anything
+    unparseable rather than raising -- same fail-open contract as
+    echo_gate._env_number (90992c7): a hand-edited systemd drop-in with a
+    typo in this value must never crash the assistant at startup."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a number; using the default %r", name, raw, default)
+        return default
 
 
 def persona_path() -> Path:
@@ -279,7 +300,24 @@ class BrainControl:
         self.persona_store = load_persona_store()
         self.persona_tier = TIER_DEFAULT
         self._apply_persona()
-        self._config_lock = threading.Lock()
+        # RLock, not Lock: `_set_brain` records its probe result (below) while
+        # already holding this lock via `_config_set`'s outer `with`, and the
+        # background reconcile thread also needs to take it around its own
+        # probes -- a plain Lock would deadlock on the first path.
+        self._config_lock = threading.RLock()
+        # Observed reachability per brain, keyed by name: {"ok": bool, "at":
+        # monotonic seconds, "error": str}. Absent = never probed since
+        # startup, reported to the panel as `reachable: null`. Orthogonal to
+        # `available` (configured intent, from brains.json) -- this is what
+        # the last actual probe (a switch attempt or a background sweep)
+        # observed. Guarded by `_config_lock`.
+        self._brain_probes: dict[str, dict[str, Any]] = {}
+        # Background-reconcile bookkeeping, also under `_config_lock`: at most
+        # one sweep in flight, and a debounce so opening the panel repeatedly
+        # doesn't restart it before the last one even finished.
+        self._reconcile_in_progress = False
+        self._last_reconcile_start: Optional[float] = None
+        self._reconcile_thread: Optional[threading.Thread] = None
         self.tools_armed = 0
         try:
             armed = voice_tools.get_tool_defs()
@@ -399,6 +437,7 @@ class BrainControl:
         try:
             msg_type = msg.get("type")
             if msg_type == "config_get":
+                self._maybe_start_reconcile()
                 state = self._config_state()
                 if self.cockpit is not None:
                     # Push a fresh cockpit_state to all clients so a page that
@@ -434,7 +473,82 @@ class BrainControl:
             "models": gate.available_models(),
         }
 
+    def _record_probe(self, name: str, ok: bool, error: str) -> bool:
+        """Atomically record the outcome of an actual reachability probe for
+        `name` and report whether the OBSERVABLE state changed.
+
+        The compare (against the prior entry) and the write both happen
+        under `_config_lock` in one critical section -- reading the prior
+        value outside the lock and comparing after the fact is a race: a
+        concurrent `_set_brain` probe for the same brain could land in
+        between, making the comparison stale and the caller's `changed`
+        computation wrong (missed or spurious broadcast). A first-ever
+        record (no prior entry) counts as changed -- that's the
+        null-to-observed transition the panel needs to redraw for.
+
+        Called both from `_set_brain` (already holding `_config_lock` via
+        `_config_set`) and from the background reconcile thread (which takes
+        the lock fresh) -- reentrant-safe because `_config_lock` is an RLock.
+        `_set_brain`'s callers ignore the return value; only the reconcile
+        loop needs it.
+        """
+        with self._config_lock:
+            before = self._brain_probes.get(name)
+            changed = before is None or before.get("ok") != ok or before.get("error") != error
+            self._brain_probes[name] = {"ok": ok, "at": time.monotonic(), "error": error}
+            return changed
+
+    def _maybe_start_reconcile(self) -> None:
+        """Kick a daemon thread that serially re-probes every `available:
+        true` brain, unless one is already running or the last sweep started
+        too recently (ruling 3). Never blocks the caller -- `config_get` must
+        return with cached/stale reachability, not wait on the network."""
+        debounce = _env_seconds("VOICE_BRAIN_PROBE_DEBOUNCE_S", _DEFAULT_PROBE_DEBOUNCE_S)
+        now = time.monotonic()
+        with self._config_lock:
+            if self._reconcile_in_progress:
+                return
+            if self._last_reconcile_start is not None and (now - self._last_reconcile_start) < debounce:
+                return
+            self._reconcile_in_progress = True
+            self._last_reconcile_start = now
+        thread = threading.Thread(
+            target=self._reconcile_brain_reachability, name="brain-reachability-probe", daemon=True
+        )
+        self._reconcile_thread = thread
+        thread.start()
+
+    def _reconcile_brain_reachability(self) -> None:
+        """Body of the background reconcile thread: probe every configured
+        (`available: true`) brain, then broadcast a fresh `config_state` if
+        anything observable changed. Never raises out -- this runs
+        unsupervised on its own thread, nowhere to report an exception to
+        except the log."""
+        try:
+            changed = False
+            for name, entry in list(self.brains.items()):
+                if not entry.get("available", False):
+                    continue
+                base_url = entry.get("base_url")
+                model = entry.get("model", "auto")
+                api_key = self._resolve_api_key(entry)
+                # Network probe stays OUTSIDE the lock -- only the
+                # compare-and-record in `_record_probe` needs it.
+                resolved = self._resolve_model(base_url, model, api_key)
+                ok = resolved is not None
+                error = "" if ok else f"model probe failed for {name}"
+                changed |= self._record_probe(name, ok, error)
+            if changed and self.streamer is not None:
+                self.streamer.broadcast_json(self._config_state())
+        except Exception:
+            logger.exception("BrainControl: background reachability reconcile failed")
+        finally:
+            with self._config_lock:
+                self._reconcile_in_progress = False
+
     def _config_state(self) -> dict[str, Any]:
+        with self._config_lock:
+            probes = dict(self._brain_probes)
         return {
             "type": "config_state",
             "active_brain": self.active_brain,
@@ -454,6 +568,10 @@ class BrainControl:
                     "model": entry.get("model", ""),
                     "available": entry.get("available", False),
                     "note": entry.get("note", ""),
+                    # Observed, not configured -- null until a switch attempt
+                    # or a background sweep has actually probed this brain.
+                    "reachable": probes.get(name, {}).get("ok"),
+                    "probe_error": probes.get(name, {}).get("error", ""),
                 }
                 for name, entry in self.brains.items()
             ],
@@ -608,7 +726,12 @@ class BrainControl:
         api_key = self._resolve_api_key(entry)
         resolved = self._resolve_model(base_url, model, api_key)
         if resolved is None:
-            return False, f"model probe failed for {name}"
+            error = f"model probe failed for {name}"
+            # Recorded on failure too (not just success): a failed switch must
+            # immediately mark the brain unreachable in the next config_state,
+            # not wait for the next background sweep.
+            self._record_probe(name, False, error)
+            return False, error
 
         # Same swap + _extra_body rule as BaseOpenAICompatibleHandler.setup()
         # (disable_thinking=True, no reasoning_effort — matches our CLI default).
@@ -616,6 +739,7 @@ class BrainControl:
         self.llm_handler.model_name = resolved
         self.llm_handler._extra_body = BaseOpenAICompatibleHandler._build_extra_body(base_url, True, None)
         self.active_brain = name
+        self._record_probe(name, True, "")
         return True, ""
 
     def _set_voice(self, name: str) -> tuple[bool, str]:

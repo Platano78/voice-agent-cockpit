@@ -802,6 +802,11 @@
   .brainOption.disabled { cursor: not-allowed; }
   .brainOption.disabled:hover { background: none; }
   .brainOption.disabled label { color: var(--text-muted); cursor: not-allowed; }
+  /* Configured (`available`) but the last probe couldn't reach it -- dimmer
+     than the normal row, one notch lighter than the fully-disabled treatment
+     above, and still clickable: the probe may be stale, and a click either
+     succeeds or produces the honest per-switch error anyway. */
+  .brainOption.unreachable label { opacity: 0.7; }
   #personaInput {
     width: 100%;
     min-height: 80px;
@@ -2663,8 +2668,13 @@ function renderConfigState(ev) {
 
   els.brainList.innerHTML = "";
   ev.brains.forEach((b) => {
+    // `available` (from brains.json) is configured intent and stays
+    // authoritative for whether the radio is disabled. `reachable` is the
+    // last OBSERVED probe (a switch attempt or the background sweep) and
+    // only dims the row -- it may be stale, so the brain stays selectable.
+    const unreachable = b.available && b.reachable === false;
     const row = document.createElement("div");
-    row.className = "brainOption" + (b.available ? "" : " disabled");
+    row.className = "brainOption" + (b.available ? "" : " disabled") + (unreachable ? " unreachable" : "");
     const id = "brain_" + b.name;
     const input = document.createElement("input");
     input.type = "radio";
@@ -2680,7 +2690,8 @@ function renderConfigState(ev) {
     });
     const label = document.createElement("label");
     label.htmlFor = id;
-    label.textContent = b.label + (b.note ? ` — ${b.note}` : "");
+    label.textContent = b.label + (b.note ? ` — ${b.note}` : "")
+      + (unreachable ? ` — ${b.probe_error || "unreachable"}` : "");
     row.appendChild(input);
     row.appendChild(label);
     // Whole row is a tap target ≥44px tall; clicks on the input/label already

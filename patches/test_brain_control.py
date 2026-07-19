@@ -16,6 +16,8 @@ import json
 import logging
 import pathlib
 import sys
+import threading
+import time
 import types
 
 # ── Stub the speech_to_speech surface brain_control.py imports ─────────
@@ -650,6 +652,184 @@ def test_config_state_reports_the_tier_and_the_other_tiers(tmp_path, monkeypatch
     assert tiers["global"] == "my global"
     assert tiers["preset"] == brain_control.BRAIN_PRESETS["coder"]
     assert set(tiers["presets"]) == {"coder", "local", "frontier", "hermes"}
+
+
+# ── brain reachability: `available` (configured intent) vs `reachable` ──
+# (observed). `available` is never mutated by a probe -- these tests cover
+# the orthogonal `reachable`/`probe_error` fields and the config_get-driven
+# background reconcile that keeps them fresh without blocking the panel.
+
+
+def test_set_brain_failure_records_unreachable_then_success_flips_back(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x", "model": "auto"}}
+
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: None)
+    ok, error = bc._set_brain("coder")
+    assert ok is False
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+    assert entry["reachable"] is False
+    assert entry["probe_error"] == error
+    assert error  # non-empty -- the panel has something to show
+
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "some-model")
+    # The success path of `_set_brain` also rebuilds `_extra_body` via the
+    # real `BaseOpenAICompatibleHandler` -- stubbed to a bare `type(...)` with
+    # no `_build_extra_body` for the other tests in this file, which never
+    # exercise a successful switch. Give it one for just this assertion.
+    monkeypatch.setattr(
+        brain_control.BaseOpenAICompatibleHandler, "_build_extra_body", staticmethod(lambda *a, **k: None),
+        raising=False,
+    )
+    ok, error = bc._set_brain("coder")
+    assert ok is True
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "coder")
+    assert entry["reachable"] is True
+    assert entry["probe_error"] == ""
+
+
+def test_never_probed_brain_reports_null_reachable(tmp_path):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {
+        "coder": {"available": True, "base_url": "http://x"},
+        "local": {"available": False},
+    }
+
+    for entry in bc._config_state()["brains"]:
+        assert entry["reachable"] is None
+        assert entry["probe_error"] == ""
+
+
+def test_config_get_reconcile_probes_only_available_brains(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {
+        "coder": {"available": True, "base_url": "http://coder"},
+        "local": {"available": False, "base_url": "http://local"},
+        "hermes": {"available": True, "base_url": "http://hermes"},
+    }
+    calls = []
+
+    def fake_resolve(base_url, model, api_key):
+        calls.append(base_url)
+        return "model-id"
+
+    monkeypatch.setattr(bc, "_resolve_model", fake_resolve)
+
+    bc.handle({"type": "config_get"})
+    bc._reconcile_thread.join(timeout=1)
+
+    assert sorted(calls) == ["http://coder", "http://hermes"]
+
+
+def test_config_get_returns_immediately_without_waiting_on_the_probe(tmp_path, monkeypatch):
+    """The reconcile must never block config_get -- a probe stuck on the
+    network must not stall the panel opening. Uses a gated fake probe (not a
+    wall-clock race) so the assertion is deterministic."""
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_resolve(*a, **k):
+        started.set()
+        release.wait(timeout=2)
+        return "model-id"
+
+    monkeypatch.setattr(bc, "_resolve_model", slow_resolve)
+
+    t0 = time.monotonic()
+    state = bc.handle({"type": "config_get"})
+    elapsed = time.monotonic() - t0
+
+    assert state["type"] == "config_state"
+    # Returned well before the still-blocked probe could possibly finish.
+    assert elapsed < 1.0
+    assert started.wait(timeout=1), "reconcile thread never started its probe"
+    release.set()
+    bc._reconcile_thread.join(timeout=1)
+
+
+def test_debounce_skips_a_second_reconcile_started_too_soon(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    calls = []
+
+    def fake_resolve(base_url, model, api_key):
+        calls.append(base_url)
+        return "model-id"
+
+    monkeypatch.setattr(bc, "_resolve_model", fake_resolve)
+
+    bc.handle({"type": "config_get"})
+    first_thread = bc._reconcile_thread
+    first_thread.join(timeout=1)
+
+    bc.handle({"type": "config_get"})
+
+    # No second thread was started -- the attribute still points at the first.
+    assert bc._reconcile_thread is first_thread
+    assert len(calls) == 1
+
+
+def test_reconcile_no_broadcast_when_nothing_changed(tmp_path, monkeypatch):
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    bc._brain_probes["coder"] = {"ok": True, "at": 0.0, "error": ""}
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "model-id")
+
+    bc._reconcile_brain_reachability()
+
+    assert streamer.broadcasts == []
+
+
+def test_reconcile_broadcasts_once_when_something_changed(tmp_path, monkeypatch):
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    bc._brain_probes["coder"] = {"ok": True, "at": 0.0, "error": ""}
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: None)
+
+    bc._reconcile_brain_reachability()
+
+    assert len(streamer.broadcasts) == 1
+    assert streamer.broadcasts[0]["type"] == "config_state"
+    entry = next(b for b in streamer.broadcasts[0]["brains"] if b["name"] == "coder")
+    assert entry["reachable"] is False
+
+
+def test_reconcile_with_no_streamer_and_a_change_does_not_crash(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path, streamer=None)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: None)
+
+    bc._reconcile_brain_reachability()  # must not raise
+
+    assert bc._brain_probes["coder"]["ok"] is False
+    assert bc._reconcile_in_progress is False
+
+
+def test_garbage_probe_debounce_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("VOICE_BRAIN_PROBE_DEBOUNCE_S", "not-a-number")
+    assert brain_control._env_seconds("VOICE_BRAIN_PROBE_DEBOUNCE_S", 20.0) == 20.0
+
+
+def test_garbage_probe_debounce_env_still_debounces_a_second_config_get(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOICE_BRAIN_PROBE_DEBOUNCE_S", "garbage")
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {"coder": {"available": True, "base_url": "http://x"}}
+    calls = []
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: (calls.append(1), "model-id")[1])
+
+    bc.handle({"type": "config_get"})
+    bc._reconcile_thread.join(timeout=1)
+    bc.handle({"type": "config_get"})
+
+    # Falls back to the 20s default rather than crashing or treating the
+    # garbage value as "debounce disabled".
+    assert len(calls) == 1
 
 
 def test_presets_are_plausible_voice_system_prompts():

@@ -338,6 +338,18 @@ kept as an instant rollback (see below).
 - `$HOME/speech-to-speech/brains.json` — brain registry (label,
   base_url, model, availability, notes, optional `api_key`/`api_key_file`+
   `api_key_var`). `hermes` flipped to `available: true` for #8.
+
+  `available` is configured intent — the user turned this lane on in the
+  registry — and `_config_set`/the panel never mutate it. `reachable` (`true`
+  / `false`, or `null` before anything has ever checked) is the orthogonal,
+  observed half: the last time a probe actually hit the endpoint, did it
+  answer. It updates on every switch attempt (success or failure) and on a
+  debounced background sweep (`VOICE_BRAIN_PROBE_DEBOUNCE_S`, default 20s)
+  kicked off whenever the panel opens (`config_get`) — the sweep runs on its
+  own thread so opening the panel never waits on the network. An unreachable
+  brain stays selectable in the UI, just dimmed with the last probe error:
+  the entry may be stale, or a real endpoint may have come back up, so the
+  panel never blocks a click on it.
 - `<cockpit-repo>/webclient/index.html` — settings panel UI
   (gear button, brain radio list, persona textarea, reset-chat button). No
   protocol change was needed for #8 — the ws control-message shape is
