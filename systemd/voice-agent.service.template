@@ -32,5 +32,11 @@ RestartSec=5
 # Environment=VOICE_WS_CERTFILE=/path/to/cert.pem
 # Environment=VOICE_WS_KEYFILE=/path/to/key.pem
 
+# Secrets (tokens for optional tool integrations — e.g. HA_TOKEN for the Home
+# Assistant example tool) do NOT belong in Environment= lines: unit files are
+# world-readable via `systemctl cat`. Put them in a mode-0600 env file instead
+# and reference it here:
+# EnvironmentFile=${HOME_DIR}/.config/voice-agent/secrets
+
 [Install]
 WantedBy=multi-user.target

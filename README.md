@@ -162,6 +162,13 @@ them.
 | `VOICE_AUDITION_TEXT` | `Hi, I'm {name}. This is how I sound.` | sample spoken after a voice switch; `off` disables |
 | `VOICE_PHONE_CONTEXT` | *(unset)* | set to `off` to disable phone context server-side, even if a client has it toggled on |
 
+Secret-bearing vars (`HA_TOKEN` and friends) should not be set as
+`Environment=` lines in a systemd unit — unit files are world-readable via
+`systemctl cat`. Put them in a mode-0600 env file and load it with
+`EnvironmentFile=` (see the commented block in
+`systemd/voice-agent.service.template`); the vars reach the process
+identically either way.
+
 ## Voice tools
 
 The voice agent's LLM can call a small set of server-side tools (defined in
