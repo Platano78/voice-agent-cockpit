@@ -12,7 +12,9 @@ actual deployed logic, not a mock of it.
 
 from __future__ import annotations
 
+import json
 import logging
+import pathlib
 import sys
 import types
 
@@ -86,17 +88,17 @@ class _FakeTTSHandler:
 
 
 class _FakeRuntimeConfig:
-    def __init__(self):
-        self.session = types.SimpleNamespace(instructions=None, tools=None)
+    def __init__(self, instructions=None):
+        self.session = types.SimpleNamespace(instructions=instructions, tools=None)
         self.chat = types.SimpleNamespace(reset=lambda: None)
 
 
-def _make_brain_control(tmp_path, **kwargs):
+def _make_brain_control(tmp_path, runtime_config=None, **kwargs):
     brains_path = tmp_path / "brains.json"
     brains_path.write_text("{}")
     return brain_control.BrainControl(
         llm_handler=types.SimpleNamespace(model_name="test-model"),
-        runtime_config=_FakeRuntimeConfig(),
+        runtime_config=runtime_config or _FakeRuntimeConfig(),
         brains_path=str(brains_path),
         **kwargs,
     )
@@ -214,3 +216,184 @@ def test_voice_delete_unavailable_without_tts_handler(tmp_path):
 
     assert ok is False
     assert error == "voice switching unavailable"
+
+
+# ── persona persistence ─────────────────────────────────────────────────
+#
+# The persona editor worked but was in-memory only: every restart reverted to
+# the CLI `--init_chat_prompt` default, so the only durable way to change it
+# was editing `ExecStart` over SSH. These cover the sidecar file that fixes it.
+
+CLI_DEFAULT = "You are the shipped default."
+
+
+def _persona_env(tmp_path, monkeypatch):
+    path = tmp_path / "persona_dir" / "persona.json"
+    monkeypatch.setenv("VOICE_PERSONA_FILE", str(path))
+    return path
+
+
+def _restart(tmp_path, **kwargs):
+    """Rebuild BrainControl the way a service restart would: a fresh runtime
+    config carrying only the CLI default, nothing else in memory."""
+    return _make_brain_control(tmp_path, runtime_config=_FakeRuntimeConfig(instructions=CLI_DEFAULT), **kwargs)
+
+
+def test_persona_survives_a_restart(tmp_path, monkeypatch):
+    _persona_env(tmp_path, monkeypatch)
+    bc = _restart(tmp_path)
+
+    ack = bc._config_set({"persona": "You are a laconic ship's computer."})
+
+    assert ack["ok"] is True
+    assert ack["persona"] == "You are a laconic ship's computer."
+    assert ack["persona_persisted"] is True
+
+    revived = _restart(tmp_path)
+    assert revived.runtime_config.session.instructions == "You are a laconic ship's computer."
+    # The CLI default is still the fallback target, not overwritten by the load.
+    assert revived.default_persona == CLI_DEFAULT
+
+
+def test_clearing_persona_restores_the_cli_default_and_deletes_the_file(tmp_path, monkeypatch):
+    path = _persona_env(tmp_path, monkeypatch)
+    bc = _restart(tmp_path)
+    bc._config_set({"persona": "custom"})
+    assert path.is_file()
+
+    ack = bc._config_set({"persona": ""})
+
+    assert ack["ok"] is True
+    assert ack["persona"] == CLI_DEFAULT
+    assert ack["persona_persisted"] is False
+    assert not path.exists()
+    assert _restart(tmp_path).runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_persisted_persona_takes_precedence_over_the_cli_default(tmp_path, monkeypatch):
+    path = _persona_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"version": 1, "persona": "persisted wins"}')
+
+    state = _restart(tmp_path)._config_state()
+
+    assert state["persona"] == "persisted wins"
+    assert state["default_persona"] == CLI_DEFAULT
+    assert state["persona_persisted"] is True
+
+
+def test_missing_persona_file_falls_back_to_the_default(tmp_path, monkeypatch):
+    _persona_env(tmp_path, monkeypatch)
+
+    bc = _restart(tmp_path)
+
+    assert bc.runtime_config.session.instructions == CLI_DEFAULT
+    assert bc._config_state()["persona_persisted"] is False
+
+
+def test_corrupt_persona_file_does_not_raise(tmp_path, monkeypatch, caplog):
+    path = _persona_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"version": 1, "persona": "truncated mid-writ')
+
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        bc = _restart(tmp_path)
+
+    assert bc.runtime_config.session.instructions == CLI_DEFAULT
+    assert "unreadable persona file" in caplog.text
+
+
+def test_empty_and_non_object_persona_files_fall_back(tmp_path, monkeypatch):
+    path = _persona_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+
+    for body in ("", "   ", "null", '"a bare string"', "[]", "{}", '{"persona": ""}'):
+        path.write_text(body)
+        assert brain_control.load_persona() is None, body
+        assert _restart(tmp_path).runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_unreadable_persona_file_falls_back(tmp_path, monkeypatch):
+    # A directory where the file should be: open() raises IsADirectoryError
+    # (an OSError), which must be caught like any other read failure. Works as
+    # root, unlike a chmod-000 file.
+    path = _persona_env(tmp_path, monkeypatch)
+    path.mkdir(parents=True)
+
+    assert brain_control.load_persona() is None
+    assert _restart(tmp_path).runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_oversized_persona_on_disk_is_ignored(tmp_path, monkeypatch):
+    path = _persona_env(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"version": 1, "persona": "x" * (brain_control.PERSONA_MAX_CHARS + 1)}))
+
+    assert brain_control.load_persona() is None
+    assert _restart(tmp_path).runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_oversized_persona_is_rejected_without_persisting(tmp_path, monkeypatch):
+    path = _persona_env(tmp_path, monkeypatch)
+    bc = _restart(tmp_path)
+
+    ack = bc._config_set({"persona": "x" * (brain_control.PERSONA_MAX_CHARS + 1)})
+
+    assert ack["ok"] is False
+    assert "character cap" in ack["error"]
+    assert not path.exists()
+    assert bc.runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_control_characters_are_rejected(tmp_path, monkeypatch):
+    _persona_env(tmp_path, monkeypatch)
+    bc = _restart(tmp_path)
+
+    ack = bc._config_set({"persona": "sneaky\x1b[31m escape"})
+
+    assert ack["ok"] is False
+    assert "control characters" in ack["error"]
+    assert bc.runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_newlines_and_tabs_are_allowed(tmp_path, monkeypatch):
+    _persona_env(tmp_path, monkeypatch)
+    bc = _restart(tmp_path)
+
+    multiline = "You are terse.\n\tRules:\r\n- one\n- two"
+    assert bc._config_set({"persona": multiline})["ok"] is True
+    assert _restart(tmp_path).runtime_config.session.instructions == multiline
+
+
+def test_save_persona_leaves_no_partial_file(tmp_path, monkeypatch):
+    path = _persona_env(tmp_path, monkeypatch)
+    brain_control.save_persona("first")
+
+    assert json.loads(path.read_text())["persona"] == "first"
+    # The temp file the atomic write goes through is always cleaned up, so a
+    # later load can never pick up a half-written sibling.
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
+def test_save_persona_failure_does_not_raise(tmp_path, monkeypatch):
+    # Parent path is a FILE, so mkdir/open both fail -- persistence is
+    # best-effort and must never take down a live config_set.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setenv("VOICE_PERSONA_FILE", str(blocker / "persona.json"))
+
+    brain_control.save_persona("anything")
+
+    bc = _restart(tmp_path)
+    assert bc.runtime_config.session.instructions == CLI_DEFAULT
+    assert bc._config_state()["persona_persisted"] is False
+
+
+def test_persona_path_is_env_overridable_outside_the_package(tmp_path, monkeypatch):
+    """Same ruling-1 placement as the voices/ sidecar -- outside the package,
+    so a pip reinstall can't reach it."""
+    path = _persona_env(tmp_path, monkeypatch)
+    assert brain_control.persona_path() == path
+
+    monkeypatch.delenv("VOICE_PERSONA_FILE")
+    assert brain_control.persona_path() == pathlib.Path("~/speech-to-speech/persona.json").expanduser()

@@ -7,6 +7,8 @@ import tempfile
 import threading
 from typing import Any, Optional
 
+from pathlib import Path
+
 import httpx
 from openai import OpenAI
 
@@ -15,6 +17,97 @@ from speech_to_speech import voice_clone
 from speech_to_speech import voice_tools
 
 logger = logging.getLogger(__name__)
+
+# Same ruling-1 placement as voice_clone's `voices/` sidecar: outside the
+# package, next to brains.json, so a `pip install --upgrade` can't erase it.
+_DEFAULT_PERSONA_FILE = "~/speech-to-speech/persona.json"
+
+# The persona goes into the system message of every LLM request. The cap is a
+# sanity bound, not a policy -- it's free text the user is deliberately writing.
+PERSONA_MAX_CHARS = 8000
+
+# Newline/tab/CR are legitimate in a multi-line persona; every other C0 control
+# character (and DEL) is a paste accident or a smuggled control sequence.
+_ALLOWED_CONTROL_CHARS = "\n\r\t"
+
+
+def persona_path() -> Path:
+    return Path(os.environ.get("VOICE_PERSONA_FILE", _DEFAULT_PERSONA_FILE)).expanduser()
+
+
+def validate_persona(text: Any) -> tuple[bool, str]:
+    """Sanity-bound a user-submitted persona. Empty is valid -- it means
+    "restore the default" upstream, not "no system prompt"."""
+    if not isinstance(text, str):
+        return False, "persona must be text"
+    if len(text) > PERSONA_MAX_CHARS:
+        return False, f"persona exceeds the {PERSONA_MAX_CHARS} character cap"
+    for ch in text:
+        if (ord(ch) < 32 and ch not in _ALLOWED_CONTROL_CHARS) or ord(ch) == 127:
+            return False, "persona contains control characters"
+    return True, ""
+
+
+def load_persona() -> Optional[str]:
+    """Read the persisted persona, or None when there isn't a usable one.
+
+    Fail-safe by construction: this runs at pipeline startup in a live voice
+    assistant, so a missing/empty/unreadable/corrupt/oversized file logs and
+    yields None (fall back to the CLI default) rather than raising.
+    """
+    path = persona_path()
+    try:
+        with open(path, "r") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        logger.warning("BrainControl: ignoring unreadable persona file %s: %s", path, e)
+        return None
+
+    if not isinstance(payload, dict):
+        logger.warning("BrainControl: ignoring malformed persona file %s: not an object", path)
+        return None
+
+    persona = payload.get("persona")
+    if persona is None:
+        return None
+    ok, error = validate_persona(persona)
+    if not ok:
+        logger.warning("BrainControl: ignoring persona file %s: %s", path, error)
+        return None
+    return persona or None
+
+
+def save_persona(text: Optional[str]) -> None:
+    """Persist `text`, or clear the persisted persona when it's empty/None.
+
+    Atomic (same-directory temp file + `os.replace`), so a crash mid-write can
+    never leave a truncated file for `load_persona` to choke on. Best-effort:
+    a write failure logs and returns -- the in-memory persona is already live,
+    and losing persistence must not fail the user's config_set.
+
+    Envelope is a versioned object rather than a bare string so a later
+    per-brain keying can add a sibling `brains` map without a format break.
+    """
+    path = persona_path()
+    try:
+        if not text:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(path.name + ".tmp")
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump({"version": 1, "persona": text}, f)
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError as e:
+        logger.warning("BrainControl: failed to persist persona to %s: %s", path, e)
 
 
 class BrainControl:
@@ -57,6 +150,13 @@ class BrainControl:
         # args-class init_chat_prompt default. Empty persona restores this,
         # it never means "no system prompt".
         self.default_persona = runtime_config.session.instructions or ""
+        # Startup precedence: a persona persisted from the panel outranks the
+        # CLI default, so an edit survives a restart without touching the unit
+        # file. Clearing it deletes the file and this falls back to the default.
+        persisted = load_persona()
+        if persisted:
+            runtime_config.session.instructions = persisted
+            logger.info("BrainControl: loaded persisted persona from %s", persona_path())
         self._config_lock = threading.Lock()
         self.tools_armed = 0
         try:
@@ -65,6 +165,16 @@ class BrainControl:
             self.tools_armed = len(armed)
         except Exception as e:
             logger.warning("BrainControl: failed to arm voice tools: %s", e)
+
+    @property
+    def persona_persisted(self) -> bool:
+        """Whether a persona is currently persisted to disk. Read from the
+        filesystem rather than cached so it stays honest if the file is
+        removed out from under a running pipeline."""
+        try:
+            return persona_path().is_file()
+        except OSError:
+            return False
 
     def _load_brains(self, path: str) -> dict[str, dict[str, Any]]:
         with open(path, "r") as f:
@@ -179,6 +289,7 @@ class BrainControl:
             "active_brain": self.active_brain,
             "persona": self.runtime_config.session.instructions or "",
             "default_persona": self.default_persona or "",
+            "persona_persisted": self.persona_persisted,
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
             "voices": self._predefined_voices() if self.tts_handler else [],
             "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
@@ -220,10 +331,18 @@ class BrainControl:
                     return {"type": "config_ack", "ok": False, "error": error}
             if "persona" in msg:
                 persona = msg["persona"]
+                ok, error = validate_persona(persona)
+                if not ok:
+                    return {"type": "config_ack", "ok": False, "error": error}
                 new_instructions = persona if persona else (self.default_persona or None)
                 if new_instructions != self.runtime_config.session.instructions:
                     self.runtime_config.session.instructions = new_instructions
                     chat_reset = True
+                # Persisted unconditionally, not only on a change: an unchanged
+                # persona may still not be on disk yet (first save after the
+                # CLI default was matched by hand), and an empty persona must
+                # clear the file even when instructions already equal the default.
+                save_persona(persona)
             if "wake_word" in msg:
                 if self.streamer is None:
                     return {"type": "config_ack", "ok": False, "error": "wake word control unavailable"}
@@ -261,6 +380,8 @@ class BrainControl:
                 "active_brain": self.active_brain,
                 "model": self.llm_handler.model_name,
                 "persona": self.runtime_config.session.instructions or "",
+                "default_persona": self.default_persona or "",
+                "persona_persisted": self.persona_persisted,
                 "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
                 "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
                 "tools_armed": self.tools_armed,

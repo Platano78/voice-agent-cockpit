@@ -45,6 +45,21 @@ kept as an instant rollback (see below).
   logged; `_resolve_model`'s `GET {base_url}/models` sends it as
   `Authorization: Bearer <key>` when present.
 
+  **Persona persistence.** A persona set from the settings panel is written to
+  `$HOME/speech-to-speech/persona.json` (override with `VOICE_PERSONA_FILE`) —
+  outside the package, next to `brains.json` and the `voices/` sidecar, so a
+  `pip install --upgrade` can't erase it. At startup a persisted persona takes
+  precedence over the CLI `--init_chat_prompt` default; clearing the persona in
+  the panel deletes the file and falls back to that default. Writes are atomic
+  (temp file + `os.replace`). The load is fail-safe: a missing, empty,
+  unreadable, corrupt, or oversized file logs a warning and falls back to the
+  default rather than raising — this runs at pipeline startup, so it must never
+  take the assistant down. Submitted personas are bounded at
+  `PERSONA_MAX_CHARS` (8000) and rejected if they contain control characters
+  other than newline/tab/CR. The on-disk format is a versioned object
+  (`{"version": 1, "persona": "…"}`) so a later per-brain keying can add a
+  sibling map without a format break.
+
 - `websocket_streamer.py` — `speech_to_speech/connections/websocket_streamer.py`.
   Adds a `control_callback` constructor kwarg and a text-frame branch in
   `_handle_client`'s message loop: JSON text frames with
