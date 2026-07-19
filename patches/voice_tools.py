@@ -8,9 +8,11 @@ per-tool timeout and a short, TTS-friendly plain-text result.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Optional
@@ -24,8 +26,39 @@ logger = logging.getLogger(__name__)
 
 _MAX_RESULT_CHARS = 600
 
+# knowledge_lookup / decision_lookup return document excerpts, not one-liners,
+# so they get their own larger caps (see _RESULT_CHARS). These land in the LLM's
+# context, not in the spoken reply — the tool description still asks for 1-2
+# spoken sentences — so the budget is set by "enough to answer accurately"
+# rather than by what is speakable.
+_KNOWLEDGE_RESULT_CHARS = 1800
+
+# Per-document excerpt budget inside knowledge_lookup.
+_DOC_EXCERPT_CHARS = 450
+_CONVO_EXCERPT_CHARS = 280
+
+# How many QMD hits to actually fetch content for. 1 is too few — the live
+# "echo gate" query ranks a marginal hit first — and 3+ doubles latency while
+# diluting the answer. get() costs ~10ms once query has run, so 2 is cheap.
+_KNOWLEDGE_DOCS = 2
+_KNOWLEDGE_CONVOS = 2
+
+# Window fetched around each hit's `line`. Back 6 lines to pick up the heading
+# above the match; forward far enough for a full short section. The char cap
+# above is what actually bounds the text.
+_GET_LINES_BEFORE = 6
+_GET_MAX_LINES = 24
+
 _WEATHER_TIMEOUT_S = 6.0
 _KNOWLEDGE_TIMEOUT_S = 6.0
+# Per-backend budgets inside the parallel fan-out. They run concurrently, so
+# the wall clock is max(), not sum() — comfortably inside the 6s tool deadline.
+_QMD_TIMEOUT_S = 4.0
+_GENESIS_TIMEOUT_S = 3.0
+# Wall clock the whole fan-out gets, shared across both lanes. Sits under the
+# 6s tool deadline so a slow backend degrades to partial results rather than
+# tripping execute()'s "timed out" refusal.
+_FANOUT_BUDGET_S = 4.5
 _SEARCH_TIMEOUT_S = 10.0
 _MOOD_TIMEOUT_S = 2.0
 _HERMES_DELEGATE_TIMEOUT_S = 3.0
@@ -37,6 +70,30 @@ _MOODS = ("neutral", "happy", "excited", "thinking", "concerned", "playful", "se
 
 _QMD_URL = os.environ.get("QMD_MCP_URL", "http://localhost:8070/mcp")
 _HERMES_MCP_URL = os.environ.get("HERMES_MCP_URL", "http://localhost:8088/mcp")
+
+# QMD indexes 8 collections; only these five are "the user's own work". The
+# other three (skills 444 docs, agents 23, security 6) are tooling
+# documentation that outranks real notes on generic words — a live query for
+# "echo gate" ranked a pre-commit-hook SKILL.md first at score 1.0. Filtering
+# is what stops the tool "finding randomness". Override to widen.
+_KNOWLEDGE_COLLECTIONS = [
+    c.strip()
+    for c in os.environ.get(
+        "VOICE_KNOWLEDGE_COLLECTIONS", "knowledge-base,solutions,memory,docs,project"
+    ).split(",")
+    if c.strip()
+]
+
+# Agent Genesis (conversation history) runs as a container on this same box,
+# alongside QMD — plain HTTP REST, no auth, loopback. The MCP gateway on the
+# user's desktop is only a wrapper around this same API, so the voice agent
+# talks to it directly and skips that hop.
+_GENESIS_URL = os.environ.get("GENESIS_URL", "http://localhost:8080").rstrip("/")
+
+# Set by get_tool_defs(): whether knowledge_lookup should fan out to Genesis.
+# Genesis is a *contributor* to knowledge_lookup rather than its own tool, so
+# it has a flag instead of an arming tier. Fan-out is fail-open regardless.
+_GENESIS_ARMED = False
 
 # Optional directory of drop-in local tools (one .py per tool). Empty = off,
 # which is the public default (no behavior change). See _load_dropin_tools().
@@ -60,6 +117,11 @@ def set_cockpit(cockpit: Any) -> None:
 # One shared worker pool for the hard wall-clock deadlines below; tool calls
 # are infrequent and short-lived so a small pool is plenty.
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="voice-tool")
+
+# Separate pool for knowledge_lookup's backend fan-out. It must NOT share
+# _EXECUTOR: a tool running there submits into this one, and nesting onto a
+# saturated pool would deadlock.
+_FANOUT = ThreadPoolExecutor(max_workers=4, thread_name_prefix="voice-fanout")
 
 _WMO_WEATHER: dict[int, str] = {
     0: "clear sky",
@@ -134,10 +196,14 @@ TOOL_DEFS: list[dict] = [
         "type": "function",
         "name": "knowledge_lookup",
         "description": (
-            "Search the user's personal notes, projects, infrastructure, and "
-            "research. Use for ANY question about the user's own work or setup, "
-            "even if the phrasing is approximate or partially misheard. Answer "
-            "in 1-2 spoken sentences."
+            "Search the user's personal notes, project documentation, research, "
+            "and past conversations for FACTS — what something is, how it works, "
+            "what state it is in, what was found or measured. Use for ANY "
+            "question about the user's own work or setup, even if the phrasing "
+            "is approximate or partially misheard. This is the default choice "
+            "for 'what do I know about X', including questions about what was "
+            "decided and why. Returns excerpts from the source documents and "
+            "past conversations; read them and answer in 1-2 spoken sentences."
         ),
         "parameters": {
             "type": "object",
@@ -272,6 +338,120 @@ def _probe(url: str, payload: dict) -> bool:
         return False
 
 
+def _probe_health(base_url: str) -> bool:
+    """Return True iff ``base_url``/health answers 2xx. Used to arm the plain
+    HTTP backends, mirroring how _probe() arms the MCP ones. A container can
+    still be down even though everything is local."""
+    if not base_url:
+        return False
+    try:
+        with httpx.Client(timeout=1.5) as client:
+            return 200 <= client.get(f"{base_url}/health").status_code < 300
+    except Exception:
+        return False
+
+
+def _mcp_json(resp: httpx.Response) -> dict:
+    """Parse an MCP-over-HTTP response body. QMD answers with plain JSON; the
+    gateway answers with SSE (``data: {...}`` frames). Returns {} if neither
+    parses."""
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    return json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+        return {}
+    try:
+        return resp.json()
+    except ValueError:
+        return {}
+
+
+def _mcp_call(url: str, tool: str, arguments: dict, timeout_s: float) -> dict:
+    """Initialize an MCP session against ``url`` and call ``tool``. Returns the
+    JSON-RPC ``result`` object, or {} on any failure. Raises nothing."""
+    if not url:
+        return {}
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            init = client.post(
+                url,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "voice-agent", "version": "1"},
+                    },
+                },
+            )
+            init.raise_for_status()
+            session_id = init.headers.get("mcp-session-id")
+            if session_id:
+                headers = dict(headers, **{"mcp-session-id": session_id})
+            resp = client.post(
+                url,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments},
+                },
+            )
+            resp.raise_for_status()
+    except Exception as e:
+        logger.warning("voice_tools: MCP %s/%s failed: %r", url, tool, e)
+        return {}
+    return _mcp_json(resp).get("result") or {}
+
+
+def _mcp_text(result: dict) -> str:
+    """Pull the text payload out of an MCP tool result. QMD's ``get`` wraps it
+    in a ``resource`` block; most tools use a plain ``text`` block."""
+    for block in result.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text") or (block.get("resource") or {}).get("text")
+        if text:
+            return text
+    return ""
+
+
+def _speakable(text: str, limit: int) -> str:
+    """Flatten markdown into something a TTS voice can read: drop QMD's context
+    comment, YAML frontmatter, rules and heading/emphasis punctuation, then
+    collapse whitespace and cap length."""
+    raw = [l.strip() for l in text.splitlines()]
+    # QMD prefixes every get() with a "<!-- Context: ... -->" comment and a
+    # blank line; a window starting at line 1 then opens on YAML frontmatter,
+    # which reads as gibberish aloud. Drop both before anything else.
+    while raw and (not raw[0] or raw[0].startswith("<!--")):
+        raw.pop(0)
+    if raw and raw[0] == "---":
+        end = next((i for i, l in enumerate(raw[1:], 1) if l == "---"), None)
+        if end is not None:
+            raw = raw[end + 1 :]
+    lines = []
+    for stripped in raw:
+        if stripped in ("---", "```"):
+            continue
+        if stripped.startswith("#"):
+            stripped = stripped.lstrip("#").strip()
+        lines.append(stripped)
+    flat = " ".join(" ".join(lines).split())
+    flat = flat.replace("**", "").replace("`", "")
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 1].rstrip() + "…"
+
+
 def _load_dropin_tools() -> list[dict]:
     """Load drop-in tools from ``VOICE_TOOLS_DIR`` (one ``*.py`` per tool),
     registering each into ``_DISPATCH`` and returning its TOOL_DEF.
@@ -389,15 +569,22 @@ def get_tool_defs() -> list[dict]:
     if hermes_ok:
         names.update(HERMES_TOOLS)
 
+    # Genesis is local, but its container can still be down — probe /health so
+    # knowledge_lookup silently drops that lane rather than paying its timeout
+    # on every call.
+    global _GENESIS_ARMED
+    _GENESIS_ARMED = _probe_health(_GENESIS_URL)
+
     armed = [t for t in TOOL_DEFS if t["name"] in names] + dropins
     _ARMED_NAMES.clear()
     _ARMED_NAMES.update(t["name"] for t in armed)
     logger.info(
-        "voice_tools: armed %d/%d (probe: qmd=%s hermes=%s)%s",
+        "voice_tools: armed %d/%d (probe: qmd=%s hermes=%s genesis=%s)%s",
         len(armed),
         len(catalog),
         "up" if qmd_ok else "down",
         "up" if hermes_ok else "down",
+        "up" if _GENESIS_ARMED else "down",
         dropin_suffix,
     )
     return armed
@@ -409,11 +596,18 @@ def get_tool_defs() -> list[dict]:
 VISUAL_TOOLS = {"set_mood"}
 
 
-def _truncate(text: str) -> str:
+def _truncate(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
     text = " ".join(text.split())
-    if len(text) <= _MAX_RESULT_CHARS:
+    if len(text) <= limit:
         return text
-    return text[: _MAX_RESULT_CHARS - 1].rstrip() + "…"
+    return text[: limit - 1].rstrip() + "…"
+
+
+# Tools whose result is document content rather than a one-line answer, and so
+# needs more room than the default _MAX_RESULT_CHARS.
+_RESULT_CHARS = {
+    "knowledge_lookup": _KNOWLEDGE_RESULT_CHARS,
+}
 
 
 # Kept as a shared constant so the runner's own fallback refusal (when
@@ -500,64 +694,124 @@ def _run_web_search(query: str) -> str:
     return _truncate(" | ".join(lines))
 
 
-def _run_knowledge_lookup(query: str) -> str:
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    with httpx.Client(timeout=_KNOWLEDGE_TIMEOUT_S) as client:
-        init_resp = client.post(
-            _QMD_URL,
-            headers=headers,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "voice-agent", "version": "1"},
-                },
-            },
-        )
-        init_resp.raise_for_status()
-        session_id = init_resp.headers.get("mcp-session-id")
-        if not session_id:
-            return "The knowledge base is unavailable right now."
+def _qmd_query(query: str, collections: list[str] | None) -> list[dict]:
+    args: dict[str, Any] = {
+        # lex alone misses approximate/misheard queries (STT can turn
+        # "pi harness" into "pie harness"); vec catches those by meaning. QMD
+        # merges/ranks/dedupes both into one result list server-side, so no
+        # client-side merge is needed here. rerank stays off: it costs ~85s,
+        # which is categorically unusable mid-conversation.
+        "searches": [
+            {"type": "lex", "query": query},
+            {"type": "vec", "query": query},
+        ],
+        "intent": "what the user knows or has written about their own projects, notes and infrastructure",
+        "rerank": False,
+        "limit": 5,
+    }
+    if collections:
+        args["collections"] = collections
+    result = _mcp_call(_QMD_URL, "query", args, _QMD_TIMEOUT_S)
+    return (result.get("structuredContent") or {}).get("results") or []
 
-        call_headers = dict(headers)
-        call_headers["mcp-session-id"] = session_id
-        call_resp = client.post(
-            _QMD_URL,
-            headers=call_headers,
-            json={
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "query",
-                    "arguments": {
-                        # lex alone misses approximate/misheard queries (STT can turn
-                        # "pi harness" into "pie harness"); vec catches those by
-                        # meaning. QMD merges/ranks/dedupes both into one result list
-                        # server-side, so no client-side merge is needed here.
-                        "searches": [
-                            {"type": "lex", "query": query},
-                            {"type": "vec", "query": query},
-                        ],
-                        "intent": "voice agent knowledge lookup",
-                        "rerank": False,
-                    },
-                },
-            },
-        )
-        call_resp.raise_for_status()
-        payload = call_resp.json()
 
-    # structuredContent.results[].snippet is diff-formatted (line numbers, hunk
-    # markers) and unusable for speech; title + file read cleanly instead.
-    results = ((payload.get("result") or {}).get("structuredContent") or {}).get("results") or []
+def _qmd_lane(query: str) -> list[str]:
+    """Search QMD and return labelled excerpts of the actual document text.
+
+    The old implementation returned only titles and filenames, so the LLM
+    answered from three filenames and confabulated the rest. Each hit carries
+    the 1-indexed ``line`` of its best match, which ``get`` turns into real
+    content. ``snippet`` is unusable here — it is diff-formatted (line numbers,
+    ``@@`` hunk markers)."""
+    results = _qmd_query(query, _KNOWLEDGE_COLLECTIONS)
     if not results:
+        # Nothing in the user's own collections — retry across the whole index
+        # rather than claiming ignorance. Filtering is a ranking aid, not a
+        # promise that the answer lives in those five collections.
+        results = _qmd_query(query, None)
+    lines = []
+    for hit in results[:_KNOWLEDGE_DOCS]:
+        path = hit.get("file")
+        if not path:
+            continue
+        doc = _mcp_call(
+            _QMD_URL,
+            "get",
+            {
+                "file": path,
+                "fromLine": max(1, int(hit.get("line") or 1) - _GET_LINES_BEFORE),
+                "maxLines": _GET_MAX_LINES,
+                "lineNumbers": False,
+            },
+            _QMD_TIMEOUT_S,
+        )
+        body = _speakable(_mcp_text(doc), _DOC_EXCERPT_CHARS)
+        if body:
+            lines.append(f"From your notes ({hit.get('title') or path}): {body}")
+    return lines
+
+
+def _genesis_lane(query: str) -> list[str]:
+    """Search past conversations. Fail-open: any problem returns nothing and
+    knowledge_lookup still answers from QMD alone."""
+    if not (_GENESIS_ARMED and _GENESIS_URL):
+        return []
+    try:
+        with httpx.Client(timeout=_GENESIS_TIMEOUT_S) as client:
+            resp = client.post(
+                f"{_GENESIS_URL}/search",
+                json={"query": query, "limit": _KNOWLEDGE_CONVOS},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception as e:
+        logger.warning("voice_tools: genesis search failed: %r", e)
+        return []
+    lines = []
+    for hit in (payload.get("results") or [])[:_KNOWLEDGE_CONVOS]:
+        # `document` is the raw conversation text and is already readable —
+        # unlike QMD, there is no second content fetch to make.
+        body = _speakable(hit.get("document") or "", _CONVO_EXCERPT_CHARS)
+        if body:
+            lines.append(f"From a past conversation: {body}")
+    return lines
+
+
+def _run_knowledge_lookup(query: str) -> str:
+    """Fan out to QMD (local notes) and Agent Genesis (past conversations) in
+    parallel, then merge into one source-labelled result."""
+    # Both lanes start now and share one wall-clock deadline. Waiting on each
+    # for its own budget in turn would stack (4s + 3s = 7s) and blow the 6s
+    # tool deadline; a shared deadline keeps the fan-out at max(), not sum().
+    # A lane makes several sequential calls, so its per-call httpx timeouts can
+    # otherwise run well past its budget.
+    deadline = time.monotonic() + _FANOUT_BUDGET_S
+    futures = [
+        (_FANOUT.submit(_qmd_lane, query), "qmd"),
+        (_FANOUT.submit(_genesis_lane, query), "genesis"),
+    ]
+    lines: list[str] = []
+    for future, label in futures:
+        try:
+            lines.extend(future.result(timeout=max(0.0, deadline - time.monotonic())))
+        except Exception as e:
+            # Degrade, never fail: a dead or slow lane must not take the tool
+            # down, and must not cost the other lane its results.
+            logger.warning("voice_tools: knowledge lane %s failed: %r", label, e)
+    if not lines:
         return f"I didn't find anything in your notes about {query!r}."
-    lines = [f"{r.get('title', 'untitled')} in {r.get('file', 'notes')}" for r in results[:3]]
-    return _truncate("; ".join(lines))
+    return " ".join(lines)
+
+
+# NOTE: no decision_lookup tool. Faulkner's only local HTTP surface is the
+# visualization API (`GET :8086/api/search?q=`), which is a substring filter
+# ANDing every word of the query with no relevance ranking. Natural-language
+# decision questions — exactly what an LLM would send — match nothing:
+# `q=why did we choose two processes` returns 0 nodes, while `q=gate` returns
+# 131 unranked ones spanning every project. The richer `query_decisions`
+# hybrid search lives in an MCP server that does not run on this box. Shipping
+# a tool over /api/search would answer "I didn't find a recorded decision" to
+# almost every real question. See the slice report.
 
 
 def _run_set_mood(mood: str) -> str:
@@ -664,7 +918,7 @@ def execute(name: str, kwargs: dict) -> str:
             logger.warning("voice_tools.execute: %s timed out after %.1fs", name, timeout_s)
             future.cancel()
             return f"The {tool_label} timed out."
-        return _truncate(result) if result else f"The {tool_label} failed."
+        return _truncate(result, _RESULT_CHARS.get(name, _MAX_RESULT_CHARS)) if result else f"The {tool_label} failed."
     except Exception as e:
         logger.warning("voice_tools.execute: %s failed: %r", name, e)
         return f"The {tool_label} failed."
