@@ -14,10 +14,13 @@ imported for real rather than stubbed -- tests assert against its actual
 
 from __future__ import annotations
 
+import itertools
 import sys
 import types
 from queue import Queue
 from typing import Generic, TypeVar
+
+_id_counter = itertools.count(1)
 
 # ── Stub the speech_to_speech surface lm_output_processor.py imports ───
 
@@ -128,7 +131,18 @@ def _install_stubs():
     mod("speech_to_speech.pipeline.speculative_turns", SpeculativeTurnTracker=object)
     mod("speech_to_speech.turn_stats", turn_stats=_TurnStatsRecorder())
     mod("speech_to_speech.utils")
-    mod("speech_to_speech.utils.utils", response_wants_audio=lambda response: True)
+    # _generate_id must hand back a DISTINCT id per call: the id is an
+    # identity key during chat compaction, so a stub that returns a constant
+    # would let an id-collision bug through. test_stream_watchdog.py stubs
+    # this same attribute with a constant-per-prefix lambda -- passing our
+    # own here unconditionally overwrites it whichever file is imported
+    # first, and lm_output_processor binds it by value at import (below),
+    # so a later re-stub by that file cannot reach us.
+    mod(
+        "speech_to_speech.utils.utils",
+        response_wants_audio=lambda response: True,
+        _generate_id=lambda prefix: f"{prefix}_{next(_id_counter)}",
+    )
 
 
 _install_stubs()
@@ -146,11 +160,22 @@ class _FakeToolCall:
 
 
 class _FakeChat:
+    """Stands in for LLM/chat.py's Chat.
+
+    ``buffer`` mirrors the real ``_append_tool_output_locked``, which does a
+    bare ``self.buffer.append(output_item)`` -- notably WITHOUT routing through
+    ``add_item()``, so nothing upstream backfills a missing ``id``. That
+    asymmetry is what ``test_buffer_items_all_satisfy_compaction_invariant``
+    pins down: whatever we construct is exactly what the compactor later sees.
+    """
+
     def __init__(self):
         self.tool_outputs: list[tuple[str, object]] = []
+        self.buffer: list[object] = []
 
     def append_tool_output(self, call_id, output_obj):
         self.tool_outputs.append((call_id, output_obj))
+        self.buffer.append(output_obj)
 
 
 class _FakeRuntimeConfig:
@@ -499,3 +524,87 @@ def test_filler_not_consulted_when_response_does_not_want_audio(monkeypatch):
     list(proc.process(chunk))  # round 1
 
     assert picks == []
+
+
+# ── tool-output item ids (chat-compaction invariant) ────────────────────
+#
+# Every item that lands in the chat buffer must carry a non-empty id.
+# Compaction asserts exactly that (chat.py's _to_responses_api_chat_locked:
+# ``assert item.id is not None and item.id != ""``) and an id-less item
+# there raises mid-_generate, poisoning chat state for the life of the
+# process -- the assistant goes permanently silent, no crash, until restart.
+# append_tool_output() bypasses add_item(), which is the only thing that
+# backfills ids, so these two construction sites have to supply their own.
+
+
+def _assert_compaction_invariant(chat):
+    """Replicate the assert compaction runs over the buffer."""
+    assert chat.buffer, "expected at least one buffered item to check"
+    for item in chat.buffer:
+        item_id = getattr(item, "id", None)
+        assert item_id is not None and item_id != "", f"item.id is {item_id!r}"
+
+
+def test_real_result_tool_output_has_non_empty_id(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    _run_round(proc, rc, 1)
+
+    assert len(rc.chat.tool_outputs) == 1
+    output_obj = rc.chat.tool_outputs[0][1]
+    assert output_obj.output == "ok"  # the real-result path, not the synthetic one
+    assert output_obj.id
+
+
+def test_synthetic_cap_tool_output_has_non_empty_id(monkeypatch):
+    monkeypatch.setenv("VOICE_TOOL_CALL_CAP", "1")
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    _run_round(proc, rc, 1)  # within cap
+    _run_round(proc, rc, 2)  # cap+1 -> synthetic refusal
+
+    output_obj = rc.chat.tool_outputs[-1][1]
+    assert output_obj.output == lm_output_processor._SYNTHETIC_CAP_OUTPUT
+    assert output_obj.id
+
+
+def test_tool_output_ids_are_unique_across_calls(monkeypatch):
+    # A constant id would satisfy "non-empty" while still corrupting
+    # compaction: ids are identity keys (marker_ids/drop_ids), so a
+    # collision makes the compactor drop the wrong items.
+    monkeypatch.setenv("VOICE_TOOL_CALL_CAP", "2")
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    _run_round(proc, rc, 1, num_calls=3)  # real-result path, 3 calls
+    _run_round(proc, rc, 2, num_calls=2)  # real-result path, 2 calls
+    _run_round(proc, rc, 3, num_calls=3)  # cap+1 -> synthetic path, 3 calls
+
+    ids = [output_obj.id for _, output_obj in rc.chat.tool_outputs]
+    assert len(ids) == 8
+    assert len(set(ids)) == len(ids), f"duplicate tool-output ids: {ids}"
+
+
+def test_buffer_items_all_satisfy_compaction_invariant(monkeypatch):
+    """Regression test for the permanent-silence bug.
+
+    Drives real tool calls through process() across both the executed and
+    the over-cap synthetic paths, then asserts the buffer satisfies the same
+    invariant compaction asserts. Fails against the pre-fix code, where
+    neither construction site passed an id.
+    """
+    monkeypatch.setenv("VOICE_TOOL_CALL_CAP", "3")
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    for n in range(1, 6):  # rounds 1-3 execute, 4-5 go over cap
+        _run_round(proc, rc, n, num_calls=2)
+
+    assert len(rc.chat.buffer) == 10
+    _assert_compaction_invariant(rc.chat)

@@ -25,7 +25,7 @@ from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRe
 from speech_to_speech.pipeline.queue_types import TextEventItem, TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.turn_stats import turn_stats
-from speech_to_speech.utils.utils import response_wants_audio
+from speech_to_speech.utils.utils import _generate_id, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +218,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         tool_call.call_id,
                         RealtimeConversationItemFunctionCallOutput(
                             type="function_call_output",
+                            id=_generate_id("fco"),
                             call_id=tool_call.call_id,
                             output=_SYNTHETIC_CAP_OUTPUT,
                         ),
@@ -242,6 +243,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         tool_call.call_id,
                         RealtimeConversationItemFunctionCallOutput(
                             type="function_call_output",
+                            id=_generate_id("fco"),
                             call_id=tool_call.call_id,
                             output=result,
                         ),
