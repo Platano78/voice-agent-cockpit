@@ -841,8 +841,8 @@
     padding: 8px;
     font: 13px/1.4 inherit;
   }
-  #voiceCloneAdvanced, #wsUrlAdvanced { margin-top: 10px; }
-  #voiceCloneAdvanced summary, #wsUrlAdvanced summary {
+  #voiceCloneAdvanced, #wsUrlAdvanced, #appearanceGroup, #inputGroup { margin-top: 10px; }
+  #voiceCloneAdvanced summary, #wsUrlAdvanced summary, #appearanceGroup summary, #inputGroup summary {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -860,17 +860,17 @@
     background: var(--bg);
     list-style: none; /* Firefox's own marker — display:flex already drops Chrome's; we draw a chevron ourselves */
   }
-  #voiceCloneAdvanced summary::-webkit-details-marker, #wsUrlAdvanced summary::-webkit-details-marker { display: none; }
-  #voiceCloneAdvanced summary:hover, #wsUrlAdvanced summary:hover { background: var(--border); color: var(--accent); }
-  #voiceCloneAdvanced summary .chev, #wsUrlAdvanced summary .chev {
+  #voiceCloneAdvanced summary::-webkit-details-marker, #wsUrlAdvanced summary::-webkit-details-marker, #appearanceGroup summary::-webkit-details-marker, #inputGroup summary::-webkit-details-marker { display: none; }
+  #voiceCloneAdvanced summary:hover, #wsUrlAdvanced summary:hover, #appearanceGroup summary:hover, #inputGroup summary:hover { background: var(--border); color: var(--accent); }
+  #voiceCloneAdvanced summary .chev, #wsUrlAdvanced summary .chev, #appearanceGroup summary .chev, #inputGroup summary .chev {
     display: inline-block;
     font-size: 10px;
     color: var(--text-muted);
     transition: transform 0.15s ease;
   }
-  #voiceCloneAdvanced[open] summary .chev, #wsUrlAdvanced[open] summary .chev { transform: rotate(90deg); }
+  #voiceCloneAdvanced[open] summary .chev, #wsUrlAdvanced[open] summary .chev, #appearanceGroup[open] summary .chev, #inputGroup[open] summary .chev { transform: rotate(90deg); }
   @media (prefers-reduced-motion: reduce) {
-    #voiceCloneAdvanced summary .chev, #wsUrlAdvanced summary .chev { transition: none; }
+    #voiceCloneAdvanced summary .chev, #wsUrlAdvanced summary .chev, #appearanceGroup summary .chev, #inputGroup summary .chev { transition: none; }
   }
   #voiceCloneList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
   .voiceCloneRow {
@@ -1417,10 +1417,13 @@
       </svg>
     </button>
   </div>
-  <div class="label">Theme</div>
-  <div id="themeSwatches"></div>
-  <div class="label">Avatar</div>
-  <select id="avatarSelect"></select>
+  <details id="appearanceGroup">
+    <summary><span class="chev" aria-hidden="true">▸</span>Appearance</summary>
+    <div class="label">Theme</div>
+    <div id="themeSwatches"></div>
+    <div class="label">Avatar</div>
+    <select id="avatarSelect"></select>
+  </details>
   <div id="brainStatus">—</div>
   <div class="label">Brain</div>
   <div id="brainList"></div>
@@ -1444,23 +1447,26 @@
   <div class="hint" id="personaTierHint"></div>
   <div class="label" id="voiceLabel" hidden>Voice</div>
   <select id="voiceSelect" hidden></select>
-  <div id="wakeWordBlock" hidden>
-    <div class="label">Wake word</div>
-    <div class="brainOption">
-      <input type="checkbox" id="wakeToggle">
-      <label for="wakeToggle">Listen only after wake phrase</label>
+  <details id="inputGroup">
+    <summary><span class="chev" aria-hidden="true">▸</span>Advanced — input</summary>
+    <div id="wakeWordBlock" hidden>
+      <div class="label">Wake word</div>
+      <div class="brainOption">
+        <input type="checkbox" id="wakeToggle">
+        <label for="wakeToggle">Listen only after wake phrase</label>
+      </div>
+      <select id="wakeModelSelect"></select>
     </div>
-    <select id="wakeModelSelect"></select>
-  </div>
-  <div id="phoneContextBlock">
-    <div class="label">Phone context</div>
-    <div class="brainOption">
-      <input type="checkbox" id="phoneContextToggle">
-      <label for="phoneContextToggle">Share location &amp; phone state</label>
+    <div id="phoneContextBlock">
+      <div class="label">Phone context</div>
+      <div class="brainOption">
+        <input type="checkbox" id="phoneContextToggle">
+        <label for="phoneContextToggle">Share location &amp; phone state</label>
+      </div>
+      <div class="hint">Used for weather and local time. Sent only to your voice server; the active brain sees an approximate location — including remote brains if you use one.</div>
+      <div id="phoneContextStatus" role="status" aria-live="polite"></div>
     </div>
-    <div class="hint">Used for weather and local time. Sent only to your voice server; the active brain sees an approximate location — including remote brains if you use one.</div>
-    <div id="phoneContextStatus" role="status" aria-live="polite"></div>
-  </div>
+  </details>
   <details id="wsUrlAdvanced">
     <summary><span class="chev" aria-hidden="true">▸</span>Advanced — connection</summary>
     <div id="wsUrlBlock">
