@@ -2878,6 +2878,7 @@ function personaPlaceholderForScope(defaultPersona) {
 
 function setPersonaScope(scope) {
   personaScope = scope;
+  personaGlobalApplyOutrankWarn = false;
   els.personaScopeGlobalBtn.setAttribute("aria-pressed", String(scope === "global"));
   els.personaScopeBrainBtn.setAttribute("aria-pressed", String(scope === "brain"));
   if (document.activeElement !== els.personaInput) {
@@ -2921,7 +2922,16 @@ function renderPersonaStatus(ev) {
       : persisted === false
         ? " Not saved — a restart reverts it."
         : "";
-  els.personaStatus.textContent = sentence + durable;
+  // The user just applied at global scope, but this brain's own override or
+  // preset outranks it (brain_custom/brain_preset beat global in the
+  // four-tier resolution) — say so, or the Apply looks like it silently did
+  // nothing.
+  const outranked = personaGlobalApplyOutrankWarn &&
+    (t.resolved_from === "brain_custom" || t.resolved_from === "brain_preset");
+  const outrankWarning = outranked
+    ? ` Saved for every brain — but ${t.brain}'s own ${t.resolved_from === "brain_custom" ? "override" : "preset"} outranks it here, so this brain won't use it. Switch scope to "This brain only," or Clear that ${t.resolved_from === "brain_custom" ? "override" : "preset"}, to hear it here.`
+    : "";
+  els.personaStatus.textContent = sentence + durable + outrankWarning;
 
   // What Clear does from here, spelled out rather than guessed at.
   els.personaTierHint.textContent = personaScope === "brain"
@@ -2939,8 +2949,15 @@ let applyPersonaFlashGuard = false;
 // Set while an Apply/Use-default round trip is outstanding, so a config_ack
 // failure can be attributed to the persona rather than some other config_set.
 let personaApplyPending = false;
+// Set only when Apply is clicked at global scope — the one action that can be
+// silently outranked by this brain's own override/preset (a brain-scope apply
+// is tier 1, never outranked). Cleared by whatever the resulting warning tells
+// the user to do (switch scope, or Clear here), plus Clear/Preset themselves,
+// so it never outlives the Apply it describes.
+let personaGlobalApplyOutrankWarn = false;
 els.personaResetBtn.addEventListener("click", () => {
   if (!(ws && ws.readyState === WebSocket.OPEN)) return;
+  personaGlobalApplyOutrankWarn = false;
   els.personaInput.value = "";
   if (personaScope === "global") {
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, "__default__"); } catch {}
@@ -2954,6 +2971,7 @@ els.personaResetBtn.addEventListener("click", () => {
 });
 els.personaPresetBtn.addEventListener("click", () => {
   if (!(ws && ws.readyState === WebSocket.OPEN)) return;
+  personaGlobalApplyOutrankWarn = false;
   personaApplyPending = true;
   ws.send(JSON.stringify({ type: "config_set", persona_scope: "brain", persona_mode: "preset" }));
   els.personaStatus.textContent = "Switching to the tuned preset…";
@@ -2961,6 +2979,7 @@ els.personaPresetBtn.addEventListener("click", () => {
 els.applyPersonaBtn.addEventListener("click", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     personaApplyPending = true;
+    personaGlobalApplyOutrankWarn = personaScope === "global";
     ws.send(JSON.stringify({
       type: "config_set",
       persona: els.personaInput.value,
@@ -3640,6 +3659,7 @@ function handleEvent(text) {
           els.personaStatus.textContent = "Persona not applied: " + ev.error;
         }
         personaApplyPending = false;
+        personaGlobalApplyOutrankWarn = false;
       }
       break;
     default:
