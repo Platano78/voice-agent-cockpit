@@ -8,7 +8,10 @@ with an **avatar selector dropdown** to pick among bundled
 2D still-image avatar (mouth lip-synced from the same audio) — the head choice
 is user-owned and persisted, independent of the active theme — a
 brain/persona selector panel, and a settings UI for switching LLM backends
-live over the WebSocket control channel.
+live over the WebSocket control channel. The persona panel ships with a
+library of ten built-in personas (offered starting points, never
+auto-applied) alongside your own saved ones — pick one, tweak the text if you
+like, then hit Apply.
 
 This repo is a **skeleton**: the custom cockpit UI and the patch pack that
 wires persona/brain switching into `speech-to-speech` are here, but the

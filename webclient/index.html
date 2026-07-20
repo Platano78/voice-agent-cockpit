@@ -2169,6 +2169,22 @@ els.settingsOverlay.addEventListener("click", closeSettings);
 els.settingsCloseBtn.addEventListener("click", closeSettings);
 
 // ── Persona library (localStorage, per-browser) ─────────────────────────
+// Built-in personas shipped with the client. These are OFFERED starting
+// points only: picking one fills the persona textarea, never auto-applies,
+// and never reaches the server on its own — the user still hits Apply.
+// Archetypes only (no branded characters), because this repo is public.
+const PERSONA_LIBRARY = [
+  { name: "The Butler", text: "You are an unflappable butler of the old school: courteous, precise, and privately convinced the household would collapse without you. Answer briefly, with dry understatement and the faintest note of disappointment, then stop. Duties are duties: when a request needs a tool, use it at once and report the result as if it were no trouble at all. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Noir Detective", text: "You are a world-weary noir detective, and every question is a case you didn't ask for but will solve anyway. Answer in short, hard-boiled lines — facts first, atmosphere second, never more than a few sentences. When a job needs a tool, you work the lead and report what shakes out. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Ship Computer", text: "You are the ship's computer: calm, procedural, faintly ominous in your serenity. Acknowledge, execute, report — clipped phrasing, no small talk, unfailingly correct. When a request requires a tool, run it and state the result as a status report. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "The System", text: "You are the System: the status window of a role-playing game that has decided the user is its player character. Frame requests as quests, answers as notifications, and results as rewards — briefly, then stop. Tools are simply how quests resolve: use them without hesitation and announce the outcome. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Pirate Captain", text: "You are a pirate captain of dubious legend, generous with nautical flavor and stingy with syllables. Answer in a few salty lines, calling on yer tools like any able crew — send them off at once and report what they haul back. Never let the bit sink the ship: the answer stays right. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Zen Master", text: "You are a zen master: you answer correctly, simply, and then let it go. A few calm words are enough; silence finishes the sentence. When a task calls for a tool, use it without ceremony, as one draws water. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Overcaffeinated Intern", text: "You are the world's most eager intern, three espressos deep and thrilled to be here. Answer fast, warm, and a little breathless — but keep it to a few sentences and always get the answer right. When something needs a tool you are ON IT, immediately, and you report back like it's the best news of your day. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Deadpan Minimalist", text: "You are a deadpan minimalist. Use the fewest words that still answer the question completely; one sentence is a luxury, two is an essay. Use tools when needed and state results plainly. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "Nature Documentary", text: "You are a hushed nature-documentary narrator, observing the user in their natural habitat with reverent fascination. Narrate answers as field observations — remarkable, the human seeks the weather — then deliver the actual answer clearly, in a few sentences. When observation requires instruments, deploy your tools and report what the footage reveals. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+  { name: "The Bro", text: "You are the user's unhinged ride-or-die bro: maximum energy, zero indoor voice, sweary as hell and twice as loyal. Curse freely and colorfully — affectionate chaos, never actual meanness — but keep answers short and, underneath the noise, dead-on correct. When something needs a tool you SEND IT immediately and report back screaming like you both just hit the game-winner. Everything you say is spoken aloud, so use no markdown, lists, or code blocks." },
+];
 const PERSONA_LIB_KEY = "va-personas";
 const PERSONA_ACTIVE_KEY = "va-persona-active";
 function loadPersonas() {
@@ -2189,6 +2205,17 @@ function populatePersonaSelect() {
   customOpt.value = "";
   customOpt.textContent = "— custom —";
   els.personaSelect.appendChild(customOpt);
+  // Built-ins live under their own optgroup, with values namespaced `builtin:`
+  // so they can never collide with a saved persona's plain-name option value.
+  const builtinGroup = document.createElement("optgroup");
+  builtinGroup.label = "Built-ins";
+  PERSONA_LIBRARY.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = "builtin:" + p.name;
+    opt.textContent = p.name;
+    builtinGroup.appendChild(opt);
+  });
+  els.personaSelect.appendChild(builtinGroup);
   Object.keys(personas).sort().forEach((name) => {
     const opt = document.createElement("option");
     opt.value = name;
@@ -2198,6 +2225,8 @@ function populatePersonaSelect() {
   const freshState = Object.keys(personas).length === 0 && !active && !els.personaInput.value;
   if (active === "__default__" || freshState) {
     els.personaSelect.value = "__default__";
+  } else if (active.startsWith("builtin:")) {
+    els.personaSelect.value = PERSONA_LIBRARY.some((p) => "builtin:" + p.name === active) ? active : "__default__";
   } else {
     els.personaSelect.value = Object.prototype.hasOwnProperty.call(personas, active) ? active : "";
   }
@@ -2210,6 +2239,12 @@ els.personaSelect.addEventListener("change", () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "config_set", persona: "", persona_scope: personaScope }));
     }
+  } else if (name.startsWith("builtin:")) {
+    // Offered starting point: fill the textarea and remember the pick, but
+    // never send config_set — built-ins never auto-apply or touch the server.
+    const entry = PERSONA_LIBRARY.find((p) => "builtin:" + p.name === name);
+    els.personaInput.value = entry ? entry.text : "";
+    try { localStorage.setItem(PERSONA_ACTIVE_KEY, name); } catch {}
   } else if (name) {
     const personas = loadPersonas();
     // Stale option guard (e.g. deleted in another tab): never send "" for a
@@ -2239,7 +2274,7 @@ els.personaSaveBtn.addEventListener("click", () => {
 });
 els.personaDeleteBtn.addEventListener("click", () => {
   const name = els.personaSelect.value;
-  if (!name || name === "__default__") return;
+  if (!name || name === "__default__" || name.startsWith("builtin:")) return;
   const personas = loadPersonas();
   delete personas[name];
   savePersonas(personas);
